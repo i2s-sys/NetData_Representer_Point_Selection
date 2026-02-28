@@ -11,7 +11,7 @@ from keras.preprocessing import image
 from influence.dataset import DataSet
 from influence.inception_v3 import preprocess_input
 
-BASE_DIR = 'data' # TODO: change
+BASE_DIR = 'data'
 
 def fill(X, Y, idx, label, img_path, img_side):
     img = image.load_img(img_path, target_size=(img_side, img_side))
