@@ -1,0 +1,6 @@
+# Ignore data files
+*.csv
+*.npy
+*.npz
+*.zip
+*.h5
