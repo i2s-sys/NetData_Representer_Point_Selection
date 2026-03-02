@@ -1,5 +1,5 @@
 """
-CostCo 矩阵补全模型 - 代表点采样版本
+CostCo 矩阵补全模型 - 这个版本是 预测单个时间点的
 训练模型 -> 计算样本重要性 -> 计算行重要性 -> 选择指定比例最重要的行 vs 随机相同比例行进行对比实验
 说明：每个实验都会使用选定的路线重新训练模型，然后预测所有链路在时间点 2001 的值
 """
@@ -196,8 +196,15 @@ class OnlineCostCoLearner:
         self.use_representer = config.get('use_representer', True)
         self.representer_method = config.get('representer_method', 'gradient')
         self.route_selection_ratio = config.get('route_selection_ratio', 0.1)  # 选择路线的比例
+        self.stage2_epochs = config.get('stage2_epochs', 20)  # 阶段2（实验阶段）训练的epoch数
         
         os.makedirs(self.save_dir, exist_ok=True)
+        
+        # 创建预测结果保存目录
+        self.predictions_dir_exp1 = os.path.join(self.save_dir, 'predictions_exp1_top_routes')
+        self.predictions_dir_exp2 = os.path.join(self.save_dir, 'predictions_exp2_random_routes')
+        os.makedirs(self.predictions_dir_exp1, exist_ok=True)
+        os.makedirs(self.predictions_dir_exp2, exist_ok=True)
         
         self.predictions = []
         self.ground_truth = []
@@ -508,15 +515,22 @@ class OnlineCostCoLearner:
 
         # 重新训练模型，只使用选定路线的数据
         print(f"  重新训练模型（只使用选定路线）...")
+        print(f"  加载阶段1模型并初始化...")
+        print(f"  使用阶段2训练epoch数: {self.stage2_epochs}")
+        
         self.model = self.create_model()  # 创建新的模型
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay
         )
+        
+        # 加载阶段1的模型权重
+        if not self.load_model('trained_model.pth'):
+            print(f"  警告: 未能加载阶段1模型，使用随机初始化")
 
-        # 使用选定路线的数据训练
-        final_loss = self.train_model_with_selected_routes(route_indices, epochs=self.epochs_per_step, verbose=True)
+        # 使用选定路线的数据训练（使用阶段2的epoch数）
+        final_loss = self.train_model_with_selected_routes(route_indices, epochs=self.stage2_epochs, verbose=True)
 
         if final_loss is None:
             print(f"  训练失败，跳过实验")
@@ -540,6 +554,9 @@ class OnlineCostCoLearner:
             mae = np.mean(np.abs(valid_predictions - valid_ground_truth))
             mse = np.mean((valid_predictions - valid_ground_truth) ** 2)
             rmse = np.sqrt(mse)
+            
+            # 计算相对误差
+            mape = np.mean(np.abs(valid_predictions - valid_ground_truth) / np.abs(valid_ground_truth))
 
             print(f"  预测完成!")
             print(f"  训练使用路线数: {len(route_indices)}")
@@ -547,16 +564,19 @@ class OnlineCostCoLearner:
             print(f"  预测MAE: {mae:.6f}")
             print(f"  预测MSE: {mse:.6f}")
             print(f"  预测RMSE: {rmse:.6f}")
+            print(f"  预测MAPE: {mape:.6f}")
             print(f"  有效预测数: {valid_mask.sum()}/{len(valid_mask)}")
 
             return {
                 'mae': mae,
                 'mse': mse,
                 'rmse': rmse,
+                'mape': mape,  # 相对误差
                 'valid_count': valid_mask.sum(),
                 'total_count': len(valid_mask),
                 'training_routes': len(route_indices),
-                'prediction_routes': self.num_routes
+                'prediction_routes': self.num_routes,
+                'predictions': predictions  # 保存所有预测值
             }
         else:
             print(f"  警告: 没有有效的真实值")
@@ -645,27 +665,43 @@ class OnlineCostCoLearner:
         print("="*80)
         if result_top and result_random:
             selection_ratio_str = f"{self.route_selection_ratio*100:.0f}%"
-            print(f"\n说明: 越小的 MAE/MSE/RMSE 越好，因此改进百分比表示 {selection_ratio_str} 最重要的行相对于随机选择提升了多少")
+            print(f"\n说明: 越小的 MAE/MSE/RMSE/MAPE 越好，第四列表示 {selection_ratio_str} 最重要的行相对于随机选择是提升了还是下降了")
             print("-"*80)
 
-            metrics = ['mae', 'mse', 'rmse', 'valid_count']
-            metric_names = ['MAE', 'MSE', 'RMSE', '有效预测数']
+            metrics = ['mae', 'mse', 'rmse', 'mape', 'valid_count']
+            metric_names = ['MAE', 'MSE', 'RMSE', 'MAPE', '有效预测数']
 
             for metric, name in zip(metrics, metric_names):
                 val_top = result_top[metric]
                 val_random = result_random[metric]
 
                 if metric == 'valid_count':
-                    improvement = f"{((val_top - val_random) / val_random * 100):.2f}%" if val_random > 0 else "N/A"
+                    # 有效预测数：越大越好
+                    if val_random > 0:
+                        if val_top > val_random:
+                            improvement = "提升了"
+                        elif val_top < val_random:
+                            improvement = "下降了"
+                        else:
+                            improvement = "持平"
                 else:
-                    improvement = f"{((val_random - val_top) / val_random * 100):.2f}%" if val_random > 0 else "N/A"
+                    # MAE/MSE/RMSE/MAPE：越小越好
+                    if val_random > 0:
+                        if val_top < val_random:
+                            improvement = "提升了"
+                        elif val_top > val_random:
+                            improvement = "下降了"
+                        else:
+                            improvement = "持平"
+                    else:
+                        improvement = "N/A"
 
-                if metric in ['mae', 'mse', 'rmse']:
+                if metric in ['mae', 'mse', 'rmse', 'mape']:
                     print(f"{name:<15} {val_top:<20.6f} {val_random:<20.6f} {improvement:<15}")
                 else:
                     print(f"{name:<15} {val_top:<20} {val_random:<20} {improvement:<15}")
 
-            print(f"\n说明: 越小的 MAE/MSE/RMSE 越好，因此改进百分比表示 {self.route_selection_ratio*100:.0f}% 最重要的行相对于随机选择提升了多少")
+            print(f"\n说明: 越小的 MAE/MSE/RMSE/MAPE 越好，因此改进百分比表示 {self.route_selection_ratio*100:.0f}% 最重要的行相对于随机选择提升了多少")
 
         # 保存实验结果
         experiment_results = {
@@ -685,6 +721,21 @@ class OnlineCostCoLearner:
         np.save(results_file, experiment_results)
         print(f"\n实验结果已保存: {results_file}")
 
+        # 单独保存实验1和实验2的预测结果到独立文件夹，文件名包含时间点后缀
+        if result_top and 'predictions' in result_top:
+            # 实验1预测结果保存到 predictions_exp1_top_routes 文件夹
+            target_time_str = f"t{self.history_end}"
+            top_predictions_file = os.path.join(self.predictions_dir_exp1, f'predictions_{target_time_str}.npy')
+            np.save(top_predictions_file, result_top['predictions'])
+            print(f"实验1（重要行）预测结果已保存: {top_predictions_file}")
+
+        if result_random and 'predictions' in result_random:
+            # 实验2预测结果保存到 predictions_exp2_random_routes 文件夹
+            target_time_str = f"t{self.history_end}"
+            random_predictions_file = os.path.join(self.predictions_dir_exp2, f'predictions_{target_time_str}.npy')
+            np.save(random_predictions_file, result_random['predictions'])
+            print(f"实验2（随机行）预测结果已保存: {random_predictions_file}")
+
         # 绘制行重要性分布和对比图
         self.plot_route_importance_comparison(route_importances, top_route_indices, random_route_indices)
 
@@ -696,10 +747,33 @@ class OnlineCostCoLearner:
         print("="*80)
     
     def save_model(self, filename):
-        """保存模型"""
+        """保存模型（包括优化器状态）"""
         model_path = os.path.join(self.save_dir, filename)
-        torch.save(self.model.state_dict(), model_path)
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'config': {
+                'embedding_dim': self.embedding_dim,
+                'nc': self.nc,
+                'lr': self.lr,
+                'weight_decay': self.weight_decay
+            }
+        }
+        torch.save(checkpoint, model_path)
         print(f"  模型已保存: {model_path}")
+
+    def load_model(self, filename):
+        """加载模型（包括优化器状态）"""
+        model_path = os.path.join(self.save_dir, filename)
+        if not os.path.exists(model_path):
+            print(f"  警告: 模型文件不存在: {model_path}")
+            return False
+        
+        checkpoint = torch.load(model_path, map_location=device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"  模型已加载: {model_path}")
+        return True
 
     def save_config(self):
         """保存配置"""
@@ -786,6 +860,8 @@ class OnlineCostCoLearner:
 
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
+        selection_ratio_str = f"{self.route_selection_ratio*100:.0f}%"
+
         # 1. 所有行的重要性分布
         axes[0, 0].hist(route_importances, bins=50, color='lightblue', edgecolor='black')
         axes[0, 0].set_title('All Routes Importance Distribution', fontsize=12, fontweight='bold')
@@ -810,7 +886,7 @@ class OnlineCostCoLearner:
 
         axes[0, 1].scatter(range(len(sorted_importances)), sorted_importances,
                           c=colors, alpha=0.6, s=20)
-        axes[0, 1].set_title('Route Importance Ranking (Red=Top 40%, Green=Random 40%)', fontsize=12, fontweight='bold')
+        axes[0, 1].set_title(f'Route Importance Ranking (Red=Top {selection_ratio_str}, Green=Random {selection_ratio_str})', fontsize=12, fontweight='bold')
         axes[0, 1].set_xlabel('Route Index (Sorted by Importance)', fontsize=10)
         axes[0, 1].set_ylabel('Route Importance', fontsize=10)
         axes[0, 1].grid(True, alpha=0.3)
@@ -861,12 +937,13 @@ def main():
         'lr': 1e-4,
         'weight_decay': 1e-7,
         'epochs_per_step': 50,
+        'stage2_epochs': 20,  # 阶段2（实验阶段）训练的epoch数
         'loss_type': 'mae',
         
         # 代表点配置
         'use_representer': True,  # 使用代表点
         'representer_method': 'gradient',  # 梯度法
-        'route_selection_ratio': 0.3,  # 选择路线的比例
+        'route_selection_ratio': 0.4,  # 选择路线的比例
 
         # 采样配置
         'sample_rate': 0.8,
@@ -892,7 +969,7 @@ def main():
     print("  3. 计算每行（路线）的平均重要性")
     print(f"  4. 实验1：使用 {selection_ratio:.0f}% 最重要的行重新训练模型，预测所有链路在时间点 2001 的值")
     print(f"  5. 实验2：使用随机 {selection_ratio:.0f}% 的行重新训练模型，预测所有链路在时间点 2001 的值")
-    print("  6. 对比两个实验的预测效果（MAE, MSE, RMSE）")
+    print("  6. 对比两个实验的预测效果（MAE, MSE, RMSE, MAPE）")
 
     learner = OnlineCostCoLearner(matrix_data, config)
     learner.run_online_learning()
@@ -905,6 +982,10 @@ def main():
     print("  - sample_importance_distribution.png: 样本重要性分布（4个子图）")
     print("  - route_importance_comparison.png: 行重要性对比（4个子图）")
     print("  - experiment_results.npy: 实验详细结果")
+    print("  - predictions_exp1_top_routes/: 实验1（重要行）预测结果文件夹")
+    print("    - predictions_t2001.npy: 实验1在时间点2001的所有预测值")
+    print("  - predictions_exp2_random_routes/: 实验2（随机行）预测结果文件夹")
+    print("    - predictions_t2001.npy: 实验2在时间点2001的所有预测值")
 
 
 if __name__ == '__main__':
