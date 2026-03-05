@@ -1,5 +1,5 @@
 """
-CostCo 矩阵补全模型 - 这个版本是
+CostCo 矩阵补全模型 - 这个版本 修改了收敛条件 实验2初始化等
 训练模型 -> 计算样本重要性 -> 计算行重要性 -> 选择指定比例最重要的行 vs 随机相同比例行进行对比实验
 说明：每个实验都会使用选定的路线重新训练模型，然后预测所有链路在指定时间点的值
 支持批量执行：可循环执行多次，每次预测不同的时间点
@@ -13,6 +13,7 @@ import os
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib
+import time
 matplotlib.use('Agg')
 
 # 配置中文字体
@@ -184,7 +185,7 @@ class OnlineCostCoLearner:
         # 配置
         self.embedding_dim = config.get('embedding_dim', 64)
         self.nc = config.get('nc', 128)
-        self.lr = config.get('lr', 1e-4)
+        self.lr = config.get('lr', 1e-3)
         self.weight_decay = config.get('weight_decay', 1e-7)
         self.epochs_per_step = config.get('epochs_per_step', 50)
         self.history_start = config.get('history_start', 0)
@@ -198,8 +199,12 @@ class OnlineCostCoLearner:
         self.use_representer = config.get('use_representer', True)
         self.representer_method = config.get('representer_method', 'gradient')
         self.route_selection_ratio = config.get('route_selection_ratio', 0.1)  # 选择路线的比例
-        self.stage2_epochs = config.get('stage2_epochs', 20)  # 阶段2（实验阶段）训练的epoch数
-        
+        self.stage2_epochs = config.get('stage2_epochs', 100)  # 阶段2（实验阶段）训练的epoch数
+        # 收敛判断参数
+        self.patience = config.get('patience', 10)  # 验证损失连续N轮没有显著变化就认为收敛
+        self.min_delta = config.get('min_delta', 1e-5)  # 验证损失变化幅度的最小阈值（绝对值）
+        self.val_split = config.get('val_split', 0.2)  # 验证集比例
+
         os.makedirs(self.save_dir, exist_ok=True)
 
         # 创建顶层预测结果保存目录（统一管理所有时间点的预测结果，基于顶层目录）
@@ -276,35 +281,54 @@ class OnlineCostCoLearner:
     
     def train_model_with_representer(self, epochs=None, verbose=True):
         """
-        训练模型 - 使用代表点重要性
+        训练模型 - 使用代表点重要性，支持基于验证损失的早停收敛判断
         """
         if epochs is None:
             epochs = self.epochs_per_step
-        
+
         # 获取训练数据
         if self.training_data is None:
             route_indices, time_indices, values = self.prepare_training_data()
             self.training_data = (route_indices, time_indices, values)
-        
+
         route_indices, time_indices, values = self.training_data
-        
+
         if values is None:
             return None, None, None
-        
-        batch_size = min(128, len(values))
+
+        # 划分训练集和验证集
+        num_samples = len(values)
+        num_val = int(num_samples * self.val_split)
+        num_train = num_samples - num_val
+
+        # 随机打乱数据
+        indices = np.random.permutation(num_samples)
+        train_indices = indices[:num_train]
+        val_indices = indices[num_train:]
+
+        # 创建训练集和验证集
+        train_route_indices = route_indices[train_indices]
+        train_time_indices = time_indices[train_indices]
+        train_values = values[train_indices]
+
+        val_route_indices = route_indices[val_indices]
+        val_time_indices = time_indices[val_indices]
+        val_values = values[val_indices]
+
+        batch_size = min(128, num_train)
         if batch_size < 10:
-            batch_size = len(values)
-        
-        dataset = torch.utils.data.TensorDataset(route_indices, time_indices, values)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        
+            batch_size = num_train
+
+        train_dataset = torch.utils.data.TensorDataset(train_route_indices, train_time_indices, train_values)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
         if self.loss_type == 'mae':
             criterion = CustomLoss('mae')
         elif self.loss_type == 'mse':
             criterion = CustomLoss('mse')
         elif self.loss_type == 'mae_mse':
             criterion = CustomLoss('mae_mse')
-        
+
         # 如果使用代表点，计算重要性
         if self.use_representer:
             print("  计算样本重要性...")
@@ -316,7 +340,7 @@ class OnlineCostCoLearner:
                 values
             )
             self.sample_importances = sample_importances
-            
+
             print(f"  样本重要性统计:")
             print(f"    平均: {grad_info['mean_importance']:.6f}")
             print(f"    标准差: {grad_info['std_importance']:.6f}")
@@ -324,33 +348,81 @@ class OnlineCostCoLearner:
             print(f"    最大: {grad_info['max_importance']:.6f}")
             print(f"    链路梯度范数: {grad_info['route_grad_norm']:.6f}")
             print(f"    时间梯度范数: {grad_info['time_grad_norm']:.6f}")
-        
+
         epoch_importances = []
-        
+
+        # 早停机制
+        best_val_loss = float('inf')
+        patience_counter = 0
+        train_loss_history = []
+        val_loss_history = []
+
         self.model.train()
-        
+
+        print(f"  训练样本数: {num_train}, 验证样本数: {num_val}")
+        print(f"  收敛判断: 连续 {self.patience} 轮验证损失变化幅度（绝对值）< {self.min_delta:.6f} 则停止")
+        print(f"  固定学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
+
         for epoch in range(epochs):
+            # 训练阶段
             total_loss = 0
-            
-            for batch_routes, batch_times, batch_values in dataloader:
+            self.model.train()
+
+            for batch_routes, batch_times, batch_values in train_dataloader:
                 predictions = self.model(batch_routes, batch_times)
                 loss = criterion(predictions, batch_values)
-                
+
                 total_loss += loss.sum().item()
-                
+
                 loss.mean().backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-            
-            avg_loss = total_loss / len(values)
-            
+
+            avg_train_loss = total_loss / num_train
+
+            # 验证阶段
+            self.model.eval()
+            with torch.no_grad():
+                val_predictions = self.model(val_route_indices, val_time_indices)
+                val_loss_batch = criterion(val_predictions, val_values)
+                avg_val_loss = val_loss_batch.sum().item() / num_val
+
+            train_loss_history.append(avg_train_loss)
+            val_loss_history.append(avg_val_loss)
+
+            # 判断是否收敛（基于验证损失的变化幅度绝对值）
+            is_best = False
+            val_loss_change = abs(avg_val_loss - best_val_loss)
+            if val_loss_change >= self.min_delta:
+                # 验证损失有显著变化（下降或上升），更新最佳损失并重置计数器
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                is_best = True
+            else:
+                # 验证损失趋于平稳，计数器+1
+                patience_counter += 1
+
             if verbose:
                 if self.use_representer and sample_importances is not None:
-                    print(f"  Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}, Samples: {len(values)}, Batch: {batch_size}, Avg Imp: {np.mean(sample_importances):.6f}")
+                    print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
+                          f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
                 else:
-                    print(f"  Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}, Samples: {len(values)}, Batch: {batch_size}")
-        
-        return avg_loss, epoch_importances
+                    print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
+                          f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
+
+            # 早停判断
+            if patience_counter >= self.patience:
+                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮变化幅度（绝对值）< {self.min_delta:.6f}")
+                print(f"  最终训练损失: {avg_train_loss:.6f}")
+                print(f"  最终验证损失: {avg_val_loss:.6f}")
+                print(f"  最佳验证损失: {best_val_loss:.6f}")
+                print(f"  实际训练轮数: {epoch+1}/{epochs}")
+                break
+
+        # 恢复训练模式
+        self.model.train()
+
+        return avg_train_loss, train_loss_history, val_loss_history
     
     def predict_routes(self, route_indices, target_time_idx):
         """预测指定路线在目标时间点的值"""
@@ -457,7 +529,7 @@ class OnlineCostCoLearner:
 
     def train_model_with_selected_routes(self, selected_route_indices, epochs=None, verbose=True):
         """
-        只使用选定路线的数据重新训练模型
+        只使用选定路线的数据重新训练模型，支持基于验证损失的早停收敛判断
         """
         if epochs is None:
             epochs = self.epochs_per_step
@@ -470,12 +542,31 @@ class OnlineCostCoLearner:
         if values is None:
             return None, None, None
 
-        batch_size = min(128, len(values))
-        if batch_size < 10:
-            batch_size = len(values)
+        # 划分训练集和验证集
+        num_samples = len(values)
+        num_val = int(num_samples * self.val_split)
+        num_train = num_samples - num_val
 
-        dataset = torch.utils.data.TensorDataset(route_indices, time_indices, values)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # 随机打乱数据
+        indices = np.random.permutation(num_samples)
+        train_indices = indices[:num_train]
+        val_indices = indices[num_train:]
+
+        # 创建训练集和验证集
+        train_route_indices = route_indices[train_indices]
+        train_time_indices = time_indices[train_indices]
+        train_values = values[train_indices]
+
+        val_route_indices = route_indices[val_indices]
+        val_time_indices = time_indices[val_indices]
+        val_values = values[val_indices]
+
+        batch_size = min(128, num_train)
+        if batch_size < 10:
+            batch_size = num_train
+
+        train_dataset = torch.utils.data.TensorDataset(train_route_indices, train_time_indices, train_values)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
         if self.loss_type == 'mae':
             criterion = CustomLoss('mae')
@@ -484,12 +575,24 @@ class OnlineCostCoLearner:
         elif self.loss_type == 'mae_mse':
             criterion = CustomLoss('mae_mse')
 
+        # 早停机制
+        best_val_loss = float('inf')
+        patience_counter = 0
+        train_loss_history = []
+        val_loss_history = []
+
         self.model.train()
 
-        for epoch in range(epochs):
-            total_loss = 0
+        print(f"  训练样本数: {num_train}, 验证样本数: {num_val}")
+        print(f"  收敛判断: 连续 {self.patience} 轮验证损失变化幅度（绝对值）< {self.min_delta:.6f} 则停止")
+        print(f"  固定学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
 
-            for batch_routes, batch_times, batch_values in dataloader:
+        for epoch in range(epochs):
+            # 训练阶段
+            total_loss = 0
+            self.model.train()
+
+            for batch_routes, batch_times, batch_values in train_dataloader:
                 predictions = self.model(batch_routes, batch_times)
                 loss = criterion(predictions, batch_values)
 
@@ -499,17 +602,58 @@ class OnlineCostCoLearner:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            avg_loss = total_loss / len(values)
+            avg_train_loss = total_loss / num_train
+
+            # 验证阶段
+            self.model.eval()
+            with torch.no_grad():
+                val_predictions = self.model(val_route_indices, val_time_indices)
+                val_loss_batch = criterion(val_predictions, val_values)
+                avg_val_loss = val_loss_batch.sum().item() / num_val
+
+            train_loss_history.append(avg_train_loss)
+            val_loss_history.append(avg_val_loss)
+
+            # 判断是否收敛（基于验证损失的变化幅度绝对值）
+            is_best = False
+            val_loss_change = abs(avg_val_loss - best_val_loss)
+            if val_loss_change >= self.min_delta:
+                # 验证损失有显著变化（下降或上升），更新最佳损失并重置计数器
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                is_best = True
+            else:
+                # 验证损失趋于平稳，计数器+1
+                patience_counter += 1
 
             if verbose and (epoch + 1) % 5 == 0:
-                print(f"  Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.6f}, Samples: {len(values)}, Batch: {batch_size}")
+                print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
+                      f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
 
-        print(f"  重新训练完成！最终损失: {avg_loss:.6f}")
+            # 早停判断
+            if patience_counter >= self.patience:
+                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮变化幅度（绝对值）< {self.min_delta:.6f}")
+                print(f"  最终训练损失: {avg_train_loss:.6f}")
+                print(f"  最终验证损失: {avg_val_loss:.6f}")
+                print(f"  最佳验证损失: {best_val_loss:.6f}")
+                print(f"  实际训练轮数: {epoch+1}/{epochs}")
+                break
 
-        return avg_loss
+        # 恢复训练模式
+        self.model.train()
 
-    def experiment_with_routes(self, route_indices, exp_name):
-        """使用指定的路线集合进行预测实验"""
+        print(f"  重新训练完成！最终损失: {avg_train_loss:.6f}, 最佳验证损失: {best_val_loss:.6f}")
+
+        return avg_train_loss
+
+    def experiment_with_routes(self, route_indices, exp_name, use_stage1_init=True):
+        """使用指定的路线集合进行预测实验
+
+        Args:
+            route_indices: 选择的路线索引
+            exp_name: 实验名称
+            use_stage1_init: 是否使用阶段1训练好的模型初始化（True则加载，False则随机初始化）
+        """
         print(f"\n【{exp_name}】")
         print(f"  使用路线数: {len(route_indices)}")
 
@@ -517,21 +661,31 @@ class OnlineCostCoLearner:
 
         # 重新训练模型，只使用选定路线的数据
         print(f"  重新训练模型（只使用选定路线）...")
-        print(f"  加载阶段1模型并初始化...")
-        print(f"  使用阶段2训练epoch数: {self.stage2_epochs}")
-        
+
+        if use_stage1_init:
+            print(f"  使用阶段1训练好的模型初始化...")
+            print(f"  使用阶段2训练epoch数（早停机制）: {self.stage2_epochs}")
+        else:
+            print(f"  使用随机初始化（不加载阶段1模型）...")
+            print(f"  使用阶段2训练epoch数（早停机制）: {self.stage2_epochs}")
+
         self.model = self.create_model()  # 创建新的模型
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay
         )
-        
-        # 加载阶段1的模型权重
-        if not self.load_model('trained_model.pth'):
-            print(f"  警告: 未能加载阶段1模型，使用随机初始化")
 
-        # 使用选定路线的数据训练（使用阶段2的epoch数）
+        # 根据参数决定是否加载阶段1的模型权重
+        if use_stage1_init:
+            # 实验1：加载阶段1的模型权重
+            if not self.load_model('trained_model.pth'):
+                print(f"  警告: 未能加载阶段1模型，使用随机初始化")
+        else:
+            # 实验2：不加载阶段1模型，使用随机初始化
+            print(f"  模型已随机初始化，未加载阶段1权重")
+
+        # 使用选定路线的数据训练（使用阶段2的epoch数，由早停机制决定实际轮数）
         final_loss = self.train_model_with_selected_routes(route_indices, epochs=self.stage2_epochs, verbose=True)
 
         if final_loss is None:
@@ -620,9 +774,11 @@ class OnlineCostCoLearner:
 
         # 训练
         print("开始训练...")
-        final_avg_loss, epoch_importances = self.train_model_with_representer(epochs=self.epochs_per_step, verbose=True)
+        final_avg_loss, train_loss_history, val_loss_history = self.train_model_with_representer(epochs=self.epochs_per_step, verbose=True)
         print(f"\n训练完成！")
-        print(f"最终平均损失: {final_avg_loss:.6f}")
+        print(f"最终平均训练损失: {final_avg_loss:.6f}")
+        print(f"训练历史: Train Loss从{train_loss_history[0]:.6f}到{train_loss_history[-1]:.6f}")
+        print(f"验证历史: Val Loss从{val_loss_history[0]:.6f}到{val_loss_history[-1]:.6f}")
 
         self.save_model('trained_model.pth')
 
@@ -650,16 +806,16 @@ class OnlineCostCoLearner:
         print(f"\n总行数: {num_routes}")
         print(f"选择的行数: {num_top_routes} ({self.route_selection_ratio*100:.0f}%)")
 
-        # 实验1: 使用 40% 最重要的行
+        # 实验1: 使用 40% 最重要的行（使用阶段1模型初始化）
         print("\n" + "-"*80)
         top_route_indices = np.argsort(route_importances)[-num_top_routes:]
-        result_top = self.experiment_with_routes(top_route_indices, f"实验1：{self.route_selection_ratio*100:.0f}% 最重要的行")
+        result_top = self.experiment_with_routes(top_route_indices, f"实验1：{self.route_selection_ratio*100:.0f}% 最重要的行", use_stage1_init=True)
 
-        # 实验2: 随机选择指定比例的行
+        # 实验2: 随机选择指定比例的行（随机初始化，不使用阶段1模型）
         print("\n" + "-"*80)
         np.random.seed(self.global_seed + 1)
         random_route_indices = np.random.choice(num_routes, num_top_routes, replace=False)
-        result_random = self.experiment_with_routes(random_route_indices, f"实验2：随机 {self.route_selection_ratio*100:.0f}% 的行")
+        result_random = self.experiment_with_routes(random_route_indices, f"实验2：随机 {self.route_selection_ratio*100:.0f}% 的行", use_stage1_init=False)
 
         # 汇总对比结果
         print("\n" + "="*80)
@@ -1020,8 +1176,8 @@ def main():
     print(f"数据类型: {matrix_data.dtype}")
     print(f"数据范围: [{np.nanmin(matrix_data):.2f}, {np.nanmax(matrix_data):.2f}]")
 
-    # 预测时间点范围：2000-2999（共1000个时间点）
-    target_time_range = range(2000, 3000)
+    # 预测时间点范围：2980-2999（共20个时间点）
+    target_time_range = range(980, 1000)
     total_iterations = len(target_time_range)
 
     # 创建汇总结果保存目录
@@ -1035,6 +1191,9 @@ def main():
         'random_routes_metrics': {'mae': [], 'mse': [], 'rmse': [], 'mape': [], 'valid_count': []}
     }
 
+    # 记录总开始时间
+    overall_start_time = time.time()
+
     print("="*80)
     print(f"开始执行 {total_iterations} 次完整实验")
     print(f"预测时间点范围: {target_time_range.start} - {target_time_range.stop-1}")
@@ -1045,12 +1204,14 @@ def main():
     print(f"  - 每个时间点的详细结果保存到独立子目录")
     print("="*80)
 
-    # 循环执行1000次实验
     for idx, target_time in enumerate(target_time_range):
         print("\n" + "="*80)
         print(f"进度: [{idx+1}/{total_iterations}] 预测时间点: {target_time}")
         print(f"训练数据范围: [0, {target_time})")
         print("="*80)
+
+        # 记录当前时间点开始时间
+        timepoint_start_time = time.time()
 
         config = {
             # 模型参数
@@ -1058,16 +1219,21 @@ def main():
             'nc': 128,
 
             # 训练参数
-            'lr': 1e-4,
+            'lr': 1e-3,
             'weight_decay': 1e-7,
-            'epochs_per_step': 50,
-            'stage2_epochs': 20,  # 阶段2（实验阶段）训练的epoch数
+            'epochs_per_step': 100,  # 增加最大epoch数，由早停机制决定实际训练轮数
+            'stage2_epochs': 100,  # 阶段2（实验阶段）训练的epoch数，也由早停机制决定
             'loss_type': 'mae',
+
+            # 收敛判断参数
+            'patience': 10,  # 验证损失连续N轮没有显著变化（绝对值）就认为收敛
+            'min_delta': 1e-4,  # 验证损失变化幅度的最小阈值（绝对值）
+            'val_split': 0.3,  # 验证集比例
 
             # 代表点配置
             'use_representer': True,  # 使用代表点
             'representer_method': 'gradient',  # 梯度法
-            'route_selection_ratio': 0.1,  # 选择路线的比例
+            'route_selection_ratio': 0.2,  # 选择路线的比例
 
             # 采样配置
             'sample_rate': 0.8,
