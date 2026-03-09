@@ -87,8 +87,11 @@ class CustomLoss(nn.Module):
 def compute_sample_importance_gradient(model, route_idx, time_idx, criterion, values):
     """
     计算每个样本的重要性（基于梯度）
-    修复：使用切片避免索引越界
+    修复：清零梯度，使用原始梯度（不取绝对值），使用梯度范数
     """
+    # 清零梯度
+    model.zero_grad()
+    
     batch_size = route_idx.size(0)
     
     # 前向传播
@@ -104,9 +107,9 @@ def compute_sample_importance_gradient(model, route_idx, time_idx, criterion, va
         total_loss.backward()
     
     # 获取嵌入层梯度（样本的贡献）
-    # 修复：使用切片而不是直接索引
-    route_grad = model.route_embeddings.weight.grad.abs()  # [num_routes, embedding_dim]
-    time_grad = model.time_embeddings.weight.grad.abs()  # [num_time, embedding_dim]
+    # 不取绝对值，使用原始梯度
+    route_grad = model.route_embeddings.weight.grad  # [num_routes, embedding_dim]
+    time_grad = model.time_embeddings.weight.grad    # [num_time, embedding_dim]
     
     # 计算每个样本的重要性
     sample_importances = []
@@ -115,8 +118,9 @@ def compute_sample_importance_gradient(model, route_idx, time_idx, criterion, va
         r = route_idx[i].item()
         t = time_idx[i].item()
 
-        route_imp = torch.sum(route_grad[r, :] ** 2).item()
-        time_imp = torch.sum(time_grad[t, :] ** 2).item()
+        # 使用梯度范数（不是平方求和）
+        route_imp = torch.norm(route_grad[r, :]).item()
+        time_imp = torch.norm(time_grad[t, :]).item()
         
         # 样本重要性 = 链路贡献 + 时间贡献
         imp = route_imp + time_imp
@@ -143,32 +147,39 @@ def compute_sample_importance_gradient(model, route_idx, time_idx, criterion, va
 def random_sampling_with_representer(matrix_data, seed_num, sample_rate=0.8, min_train_samples=100, use_representer=False):
     """
     随机采样（支持代表点）
+    优化：先找到所有有效位置，再从有效位置中采样
     """
     np.random.seed(seed_num)
     torch.manual_seed(seed_num)
     
     num_routes, num_time = matrix_data.shape
-    total_elements = num_routes * num_time
     
-    num_train = int(total_elements * sample_rate)
-    num_train = max(num_train, min_train_samples)
-    
-    # 生成随机索引
-    train_indices = np.random.choice(total_elements, num_train, replace=False)
-    mask = np.zeros(total_elements, dtype=bool)
-    mask[train_indices] = True
-    
-    keep_mask = mask.reshape(matrix_data.shape)
-    
-    # 构建训练样本
-    train_samples = []
-    
+    # 先找到所有有效位置（非0非NaN）
+    valid_positions = []
     for r in range(num_routes):
         for t in range(num_time):
             val = matrix_data[r, t]
             if not np.isnan(val) and val != 0:
-                if keep_mask[r, t]:
-                    train_samples.append((r, t, val))
+                valid_positions.append((r, t, val))
+    
+    num_valid = len(valid_positions)
+    
+    if num_valid == 0:
+        print("  警告: 没有找到有效样本（非0非NaN）")
+        return []
+    
+    # 从有效位置中采样
+    num_train = int(num_valid * sample_rate)
+    num_train = max(num_train, min_train_samples)
+    
+    # 如果有效样本数少于需要的训练样本数，使用所有有效样本
+    if num_train > num_valid:
+        num_train = num_valid
+        print(f"  警告: 有效样本数({num_valid})少于期望的训练样本数，使用所有有效样本")
+    
+    # 随机选择样本
+    selected_indices = np.random.choice(num_valid, num_train, replace=False)
+    train_samples = [valid_positions[i] for i in selected_indices]
     
     return train_samples
 
@@ -241,6 +252,14 @@ class OnlineCostCoLearner:
             embedding_dim=self.embedding_dim,
             nc=self.nc
         ).to(device)
+        
+        # 初始化优化器
+        self.optimizer = optim.Adam(
+            model.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
+        
         return model
     
     def prepare_training_data(self):
@@ -329,15 +348,19 @@ class OnlineCostCoLearner:
         elif self.loss_type == 'mae_mse':
             criterion = CustomLoss('mae_mse')
 
-        # 如果使用代表点，计算重要性
+        # 更新训练样本索引为训练集部分（用于计算行重要性）
+        self.train_route_indices = train_route_indices.cpu().numpy()
+        self.train_time_indices = train_time_indices.cpu().numpy()
+
+        # 如果使用代表点，计算重要性（只使用训练集）
         if self.use_representer:
             print("  计算样本重要性...")
             sample_importances, grad_info = compute_sample_importance_gradient(
                 self.model,
-                route_indices,
-                time_indices,
+                train_route_indices,
+                train_time_indices,
                 criterion,
-                values
+                train_values
             )
             self.sample_importances = sample_importances
 
@@ -361,7 +384,7 @@ class OnlineCostCoLearner:
 
         print(f"  训练样本数: {num_train}, 验证样本数: {num_val}")
         print(f"  收敛判断: 连续 {self.patience} 轮验证损失变化幅度（绝对值）< {self.min_delta:.6f} 则停止")
-        print(f"  固定学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
+        print(f"  学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
 
         for epoch in range(epochs):
             # 训练阶段
@@ -369,6 +392,8 @@ class OnlineCostCoLearner:
             self.model.train()
 
             for batch_routes, batch_times, batch_values in train_dataloader:
+                self.optimizer.zero_grad()
+
                 predictions = self.model(batch_routes, batch_times)
                 loss = criterion(predictions, batch_values)
 
@@ -376,7 +401,6 @@ class OnlineCostCoLearner:
 
                 loss.mean().backward()
                 self.optimizer.step()
-                self.optimizer.zero_grad()
 
             avg_train_loss = total_loss / num_train
 
@@ -390,17 +414,19 @@ class OnlineCostCoLearner:
             train_loss_history.append(avg_train_loss)
             val_loss_history.append(avg_val_loss)
 
-            # 判断是否收敛（基于验证损失的变化幅度绝对值）
+            # 判断是否收敛（基于验证损失的下降）
             is_best = False
-            val_loss_change = abs(avg_val_loss - best_val_loss)
-            if val_loss_change >= self.min_delta:
-                # 验证损失有显著变化（下降或上升），更新最佳损失并重置计数器
+            if avg_val_loss < best_val_loss:
+                # 只有验证损失下降时才更新最佳损失并重置计数器
                 best_val_loss = avg_val_loss
                 patience_counter = 0
                 is_best = True
             else:
-                # 验证损失趋于平稳，计数器+1
+                # 验证损失没有下降，计数器+1
                 patience_counter += 1
+
+            # 计算损失变化幅度（用于日志显示）
+            val_loss_change = abs(avg_val_loss - best_val_loss)
 
             if verbose:
                 if self.use_representer and sample_importances is not None:
@@ -412,7 +438,7 @@ class OnlineCostCoLearner:
 
             # 早停判断
             if patience_counter >= self.patience:
-                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮变化幅度（绝对值）< {self.min_delta:.6f}")
+                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮没有下降")
                 print(f"  最终训练损失: {avg_train_loss:.6f}")
                 print(f"  最终验证损失: {avg_val_loss:.6f}")
                 print(f"  最佳验证损失: {best_val_loss:.6f}")
@@ -423,7 +449,7 @@ class OnlineCostCoLearner:
         self.model.train()
 
         return avg_train_loss, train_loss_history, val_loss_history
-    
+
     def predict_routes(self, route_indices, target_time_idx):
         """预测指定路线在目标时间点的值"""
         self.model.eval()
@@ -710,7 +736,7 @@ class OnlineCostCoLearner:
             mae = np.mean(np.abs(valid_predictions - valid_ground_truth))
             mse = np.mean((valid_predictions - valid_ground_truth) ** 2)
             rmse = np.sqrt(mse)
-            
+
             # 计算相对误差
             mape = np.mean(np.abs(valid_predictions - valid_ground_truth) / np.abs(valid_ground_truth))
 
@@ -903,7 +929,7 @@ class OnlineCostCoLearner:
         print("\n" + "="*80)
         print("实验完成!")
         print("="*80)
-    
+
     def save_model(self, filename):
         """保存模型到顶层目录（覆盖之前的模型）"""
         # 模型保存到顶层目录，每次覆盖
@@ -1226,7 +1252,7 @@ def main():
             'loss_type': 'mae',
 
             # 收敛判断参数
-            'patience': 5,  # 验证损失连续N轮没有显著变化（绝对值）就认为收敛
+            'patience': 10,  # 验证损失连续N轮没有显著变化（绝对值）就认为收敛
             'min_delta': 1e-4,  # 验证损失变化幅度的最小阈值（绝对值）
             'val_split': 0.3,  # 验证集比例
 
