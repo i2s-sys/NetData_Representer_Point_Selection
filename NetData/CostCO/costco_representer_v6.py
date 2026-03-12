@@ -1,5 +1,5 @@
 """
-CostCo 矩阵补全模型 - 这个版本 加入相似性独立
+CostCo 矩阵补全模型 - 这个版本 确定行相似性
 训练模型 -> 计算样本重要性 -> 计算行重要性 -> 选择指定比例最重要的行 vs 随机相同比例行进行对比实验
 说明：每个实验都会使用选定的路线重新训练模型，然后预测所有链路在指定时间点的值
 支持批量执行：可循环执行多次，每次预测不同的时间点
@@ -25,7 +25,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
 class CostCo_Matrix(nn.Module):
-    """
+    """ 
     CostCo 模型 - 2 个卷积版本
     """
     def __init__(self, num_routes, num_time, embedding_dim, nc=100):
@@ -246,18 +246,18 @@ def compute_similarity_from_grads(sample_grads, k_neighbors=5, similarity_thresh
     return similarity_mat, k_nearest_indices, neighbor_counts, sampled_indices
 
 
-# ==================== 路线相似性计算（基于样本相似性）====================
+# ==================== 路线相似性计算（基于样本相似性 + 时间对齐）====================
 def compute_route_similarity_from_sample_similarity(
     similarity_mat,
     route_indices,
     time_indices,
     num_routes,
-    method='mean',
+    method='time_aligned',
     sample_importances=None,
     k_neighbors=None
 ):
     """
-    从样本相似性矩阵计算路线相似性矩阵
+    从样本相似性矩阵计算路线相似性矩阵（基于时间对齐的新方案）
 
     Args:
         similarity_mat: 样本相似性矩阵 [N_samples, N_samples]
@@ -265,13 +265,13 @@ def compute_route_similarity_from_sample_similarity(
         time_indices: 每个样本对应的时间索引 [N_samples]
         num_routes: 总路线数
         method: 聚合方法，可选：
-            - 'mean': 平均相似性（默认）
+            - 'time_aligned': 基于时间对齐的聚合（新方案，默认）
+            - 'mean': 平均相似性（旧方案）
             - 'max': 最大相似性
             - 'min': 最小相似性
             - 'weighted_mean': 加权平均（基于样本重要性）
-            - 'knn_ratio': k近邻比例（基于k近邻索引）
         sample_importances: 样本重要性 [N_samples]，用于加权平均
-        k_neighbors: k近邻数量，用于knn_ratio方法
+        k_neighbors: k近邻数量（保留参数以兼容旧接口）
 
     Returns:
         route_similarity_mat: 路线相似性矩阵 [num_routes, num_routes]
@@ -285,77 +285,139 @@ def compute_route_similarity_from_sample_similarity(
 
     num_samples = len(route_indices)
 
-    # 初始化路线相似性矩阵和计数矩阵
-    route_similarity_sum = np.zeros((num_routes, num_routes))
-    route_similarity_count = np.zeros((num_routes, num_routes))
+    if method == 'time_aligned':
+        print("  使用基于时间对齐的新方案...")
 
-    # 遍历所有样本对，按路线聚合
-    print(f"  遍历样本对进行聚合...")
-    for i in range(num_samples):
-        if i % 5000 == 0:
-            print(f"    进度: {i}/{num_samples} ({i/num_samples*100:.1f}%)")
+        # 初始化路线相似性矩阵和计数矩阵
+        route_similarity_sum = np.zeros((num_routes, num_routes))
+        route_similarity_count = np.zeros((num_routes, num_routes))
 
-        route_i = route_indices[i]
-        time_i = time_indices[i]
+        # 对每条路线遍历其所有样本点
+        print(f"  遍历路线进行时间对齐聚合...")
+        for route_r in range(num_routes):
+            if route_r % 50 == 0:
+                print(f"    进度: {route_r}/{num_routes} ({route_r/num_routes*100:.1f}%)")
 
-        for j in range(num_samples):
-            route_j = route_indices[j]
-            time_j = time_indices[j]
+            # 找到路线r的所有样本索引
+            samples_of_route_r = np.where(route_indices == route_r)[0]
 
-            # 只聚合不同路线的样本对（避免同一路线的自相似性影响）
-            if route_i != route_j:
-                similarity = similarity_mat[i, j]
+            if len(samples_of_route_r) == 0:
+                continue
 
-                if method == 'mean':
-                    # 平均聚合
-                    route_similarity_sum[route_i, route_j] += similarity
-                    route_similarity_count[route_i, route_j] += 1
+            # 遍历路线r的每个样本点
+            for sample_i in samples_of_route_r:
+                time_i = time_indices[sample_i]
 
-                elif method == 'max':
-                    # 最大聚合
-                    route_similarity_sum[route_i, route_j] = max(
-                        route_similarity_sum[route_i, route_j],
-                        similarity
-                    )
-                    route_similarity_count[route_i, route_j] = 1  # 标记已更新
+                # 找到同一时间点的所有样本
+                samples_at_time_i = np.where(time_indices == time_i)[0]
 
-                elif method == 'min':
-                    # 最小聚合
-                    if route_similarity_count[route_i, route_j] == 0:
-                        route_similarity_sum[route_i, route_j] = similarity
-                    else:
-                        route_similarity_sum[route_i, route_j] = min(
-                            route_similarity_sum[route_i, route_j],
-                            similarity
-                        )
-                    route_similarity_count[route_i, route_j] = 1
+                # 对于同一时间点的每个样本j，累加相似度到对应路线
+                for sample_j in samples_at_time_i:
+                    route_k = route_indices[sample_j]
 
-                elif method == 'weighted_mean':
-                    # 加权平均聚合（基于样本重要性）
-                    if sample_importances is not None:
-                        weight = sample_importances[i] * sample_importances[j]
-                        route_similarity_sum[route_i, route_j] += similarity * weight
-                        route_similarity_count[route_i, route_j] += weight
-                    else:
-                        # 如果没有样本重要性，退化为普通平均
+                    # 只计算与其他路线的相似度（不包括自己）
+                    if route_k != route_r:
+                        # 累加相似度
+                        route_similarity_sum[route_r, route_k] += similarity_mat[sample_i, sample_j]
+                        # 计数+1（公共时间点）
+                        route_similarity_count[route_r, route_k] += 1
+
+        # 计算最终路线相似性矩阵
+        # 避免除以零（理论上不应该发生，因为529条路线前100个时间点都有数据）
+        route_similarity_count[route_similarity_count == 0] = 1
+        route_similarity_mat = route_similarity_sum / route_similarity_count
+
+        # 设置自己与自己的相似性为-1（防止自匹配）
+        for route_r in range(num_routes):
+            route_similarity_mat[route_r, route_r] = -1.0
+
+        # 对称化（因为相似性应该是对称的）
+        # 注意：对角线仍然是-1
+        for i in range(num_routes):
+            for j in range(i + 1, num_routes):
+                avg_sim = (route_similarity_mat[i, j] + route_similarity_mat[j, i]) / 2
+                route_similarity_mat[i, j] = avg_sim
+                route_similarity_mat[j, i] = avg_sim
+
+    else:
+        # 保留旧方案以兼容
+        print("  使用旧方案（遍历所有样本对）...")
+
+        # 初始化路线相似性矩阵和计数矩阵
+        route_similarity_sum = np.zeros((num_routes, num_routes))
+        route_similarity_count = np.zeros((num_routes, num_routes))
+
+        # 遍历所有样本对，按路线聚合
+        print(f"  遍历样本对进行聚合...")
+        for i in range(num_samples):
+            if i % 5000 == 0:
+                print(f"    进度: {i}/{num_samples} ({i/num_samples*100:.1f}%)")
+
+            route_i = route_indices[i]
+            time_i = time_indices[i]
+
+            for j in range(num_samples):
+                route_j = route_indices[j]
+                time_j = time_indices[j]
+
+                # 只聚合不同路线的样本对（避免同一路线的自相似性影响）
+                if route_i != route_j:
+                    similarity = similarity_mat[i, j]
+
+                    if method == 'mean':
+                        # 平均聚合
                         route_similarity_sum[route_i, route_j] += similarity
                         route_similarity_count[route_i, route_j] += 1
 
-    # 计算最终路线相似性矩阵
-    if method in ['mean', 'weighted_mean']:
-        # 避免除以零
-        route_similarity_count[route_similarity_count == 0] = 1
-        route_similarity_mat = route_similarity_sum / route_similarity_count
-    else:
-        # max/min方法直接使用sum矩阵
-        route_similarity_mat = route_similarity_sum
+                    elif method == 'max':
+                        # 最大聚合
+                        route_similarity_sum[route_i, route_j] = max(
+                            route_similarity_sum[route_i, route_j],
+                            similarity
+                        )
+                        route_similarity_count[route_i, route_j] = 1  # 标记已更新
 
-    # 对称化（因为相似性是对称的）
-    route_similarity_mat = (route_similarity_mat + route_similarity_mat.T) / 2
+                    elif method == 'min':
+                        # 最小聚合
+                        if route_similarity_count[route_i, route_j] == 0:
+                            route_similarity_sum[route_i, route_j] = similarity
+                        else:
+                            route_similarity_sum[route_i, route_j] = min(
+                                route_similarity_sum[route_i, route_j],
+                                similarity
+                            )
+                        route_similarity_count[route_i, route_j] = 1
+
+                    elif method == 'weighted_mean':
+                        # 加权平均聚合（基于样本重要性）
+                        if sample_importances is not None:
+                            weight = sample_importances[i] * sample_importances[j]
+                            route_similarity_sum[route_i, route_j] += similarity * weight
+                            route_similarity_count[route_i, route_j] += weight
+                        else:
+                            # 如果没有样本重要性，退化为普通平均
+                            route_similarity_sum[route_i, route_j] += similarity
+                            route_similarity_count[route_i, route_j] += 1
+
+        # 计算最终路线相似性矩阵
+        if method in ['mean', 'weighted_mean']:
+            # 避免除以零
+            route_similarity_count[route_similarity_count == 0] = 1
+            route_similarity_mat = route_similarity_sum / route_similarity_count
+        else:
+            # max/min方法直接使用sum矩阵
+            route_similarity_mat = route_similarity_sum
+
+        # 对称化（因为相似性是对称的）
+        route_similarity_mat = (route_similarity_mat + route_similarity_mat.T) / 2
+
+        # 设置自己与自己的相似性为-1（防止自匹配）
+        for route_r in range(num_routes):
+            route_similarity_mat[route_r, route_r] = -1.0
 
     # 计算每条路线的相似路线数量（基于阈值）
     similarity_threshold = 0.7  # 可调整的阈值
-    route_neighbor_counts = np.sum(route_similarity_mat > similarity_threshold, axis=1) - 1  # 减去自己
+    route_neighbor_counts = np.sum(route_similarity_mat > similarity_threshold, axis=1)  # 不需要减1，因为对角线是-1
 
     print(f"  路线相似性矩阵形状: {route_similarity_mat.shape}")
     print(f"  路线相似性范围: [{route_similarity_mat.min():.6f}, {route_similarity_mat.max():.6f}]")
@@ -460,8 +522,7 @@ class OnlineCostCoLearner:
         self.route_selection_ratio = config.get('route_selection_ratio', 0.1)  # 选择路线的比例
         self.stage2_epochs = config.get('stage2_epochs', 100)  # 阶段2（实验阶段）训练的epoch数
         # 收敛判断参数
-        self.patience = config.get('patience', 10)  # 验证损失连续N轮没有显著变化就认为收敛
-        self.min_delta = config.get('min_delta', 1e-5)  # 验证损失变化幅度的最小阈值（绝对值）
+        self.patience = config.get('patience', 10)  # 验证损失连续N轮没有下降就认为收敛
         self.val_split = config.get('val_split', 0.2)  # 验证集比例
 
         # 相似性计算参数
@@ -469,6 +530,7 @@ class OnlineCostCoLearner:
         self.k_neighbors = config.get('k_neighbors', 5)  # k近邻数量
         self.similarity_threshold = config.get('similarity_threshold', 0.8)  # 相似性阈值（用于硬邻居计数）
         self.max_similarity_samples = config.get('max_similarity_samples', 50000)  # 最大样本数限制（避免内存溢出）
+        self.top_similar_routes = config.get('top_similar_routes', 3)  # 分析最重要路线相似性时，检查每条路线的前top个相似路线
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -605,75 +667,11 @@ class OnlineCostCoLearner:
         # 更新训练样本索引为训练集部分（用于计算行重要性）
         self.train_route_indices = train_route_indices.cpu().numpy()
         self.train_time_indices = train_time_indices.cpu().numpy()
-
-        # 如果使用代表点，计算重要性（只使用训练集）
-        if self.use_representer:
-            print("  计算样本重要性...")
-            sample_importances, sample_grads, grad_info = compute_sample_importance_gradient(
-                self.model,
-                train_route_indices,
-                train_time_indices,
-                criterion,
-                train_values
-            )
-            self.sample_importances = sample_importances
-
-            print(f"  样本重要性统计:")
-            print(f"    平均: {grad_info['mean_importance']:.6f}")
-            print(f"    标准差: {grad_info['std_importance']:.6f}")
-            print(f"    最小: {grad_info['min_importance']:.6f}")
-            print(f"    最大: {grad_info['max_importance']:.6f}")
-            print(f"    链路梯度范数: {grad_info['route_grad_norm']:.6f}")
-            print(f"    时间梯度范数: {grad_info['time_grad_norm']:.6f}")
-
-            # 计算样本相似性矩阵（独立函数，不修改原有重要性计算）
-            if self.use_similarity:
-                print("\n  计算样本相似性矩阵...")
-                similarity_mat, k_nearest_indices, neighbor_counts, sampled_indices = compute_similarity_from_grads(
-                    sample_grads,
-                    k_neighbors=self.k_neighbors,
-                    similarity_threshold=self.similarity_threshold,
-                    max_samples=self.max_similarity_samples  # 限制最大样本数以避免内存溢出
-                )
-
-                # 保存相似性信息
-                self.similarity_mat = similarity_mat
-                self.k_nearest_indices = k_nearest_indices
-                self.neighbor_counts = neighbor_counts
-
-                print(f"  样本相似性计算完成!")
-                print(f"    相似性矩阵形状: {similarity_mat.shape}")
-                print(f"    k近邻索引形状: {k_nearest_indices.shape}")
-                print(f"    邻居数量形状: {neighbor_counts.shape}")
-                print(f"    相似性范围: [{similarity_mat.min():.6f}, {similarity_mat.max():.6f}]")
-                print(f"    邻居数量范围: [{neighbor_counts.min():.0f}, {neighbor_counts.max():.0f}]")
-
-                # 计算路线相似性矩阵（基于样本相似性）
-                print("\\n  计算路线相似性矩阵...")
-                self.route_similarity_mat, self.route_neighbor_counts = compute_route_similarity_from_sample_similarity(
-                    similarity_mat,
-                    train_route_indices.cpu().numpy(),
-                    train_time_indices.cpu().numpy(),
-                    self.num_routes,
-                    method='mean',  # 可选: 'mean', 'max', 'min', 'weighted_mean'
-                    sample_importances=sample_importances,  # 用于加权平均
-                    k_neighbors=self.k_neighbors
-                )
-
-                # 保存路线相似性信息
-                route_similarity_file = os.path.join(self.save_dir, 'route_similarity_mat.npy')
-                np.save(route_similarity_file, self.route_similarity_mat)
-                print(f"  路线相似性矩阵已保存: {route_similarity_file}")
-
-                route_neighbor_counts_file = os.path.join(self.save_dir, 'route_neighbor_counts.npy')
-                np.save(route_neighbor_counts_file, self.route_neighbor_counts)
-                print(f"  路线邻居数量已保存: {route_neighbor_counts_file}")
-            else:
-                self.similarity_mat = None
-                self.k_nearest_indices = None
-                self.neighbor_counts = None
-                self.route_similarity_mat = None
-                self.route_neighbor_counts = None
+        
+        # 保存训练数据供后续使用
+        self.train_route_indices_tensor = train_route_indices
+        self.train_time_indices_tensor = train_time_indices
+        self.train_values_tensor = train_values
 
         epoch_importances = []
 
@@ -686,7 +684,7 @@ class OnlineCostCoLearner:
         self.model.train()
 
         print(f"  训练样本数: {num_train}, 验证样本数: {num_val}")
-        print(f"  收敛判断: 连续 {self.patience} 轮验证损失变化幅度（绝对值）< {self.min_delta:.6f} 则停止")
+        print(f"  收敛判断: 连续 {self.patience} 轮验证损失没有下降则停止")
         print(f"  学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
 
         for epoch in range(epochs):
@@ -732,12 +730,8 @@ class OnlineCostCoLearner:
             val_loss_change = abs(avg_val_loss - best_val_loss)
 
             if verbose:
-                if self.use_representer and sample_importances is not None:
-                    print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
-                          f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
-                else:
-                    print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
-                          f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
+                print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
+                      f"Best Val: {best_val_loss:.6f}, Change: {val_loss_change:.6f}, Patience: {patience_counter}/{self.patience}")
 
             # 早停判断
             if patience_counter >= self.patience:
@@ -747,6 +741,78 @@ class OnlineCostCoLearner:
                 print(f"  最佳验证损失: {best_val_loss:.6f}")
                 print(f"  实际训练轮数: {epoch+1}/{epochs}")
                 break
+
+        # 模型收敛后，计算样本重要性和相似度矩阵
+        if self.use_representer:
+            print("\n【模型收敛后计算样本重要性和相似度】")
+            
+            # 使用收敛后的模型计算样本重要性
+            print("  计算样本重要性...")
+            sample_importances, sample_grads, grad_info = compute_sample_importance_gradient(
+                self.model,
+                self.train_route_indices_tensor,
+                self.train_time_indices_tensor,
+                criterion,
+                self.train_values_tensor
+            )
+            self.sample_importances = sample_importances
+
+            print(f"  样本重要性统计:")
+            print(f"    平均: {grad_info['mean_importance']:.6f}")
+            print(f"    标准差: {grad_info['std_importance']:.6f}")
+            print(f"    最小: {grad_info['min_importance']:.6f}")
+            print(f"    最大: {grad_info['max_importance']:.6f}")
+            print(f"    链路梯度范数: {grad_info['route_grad_norm']:.6f}")
+            print(f"    时间梯度范数: {grad_info['time_grad_norm']:.6f}")
+
+            # 计算样本相似性矩阵（基于收敛后的梯度）
+            if self.use_similarity:
+                print("\n  计算样本相似性矩阵...")
+                similarity_mat, k_nearest_indices, neighbor_counts, sampled_indices = compute_similarity_from_grads(
+                    sample_grads,
+                    k_neighbors=self.k_neighbors,
+                    similarity_threshold=self.similarity_threshold,
+                    max_samples=self.max_similarity_samples
+                )
+
+                # 保存相似性信息
+                self.similarity_mat = similarity_mat
+                self.k_nearest_indices = k_nearest_indices
+                self.neighbor_counts = neighbor_counts
+
+                print(f"  样本相似性计算完成!")
+                print(f"    相似性矩阵形状: {similarity_mat.shape}")
+                print(f"    k近邻索引形状: {k_nearest_indices.shape}")
+                print(f"    邻居数量形状: {neighbor_counts.shape}")
+                print(f"    相似性范围: [{similarity_mat.min():.6f}, {similarity_mat.max():.6f}]")
+                print(f"    邻居数量范围: [{neighbor_counts.min():.0f}, {neighbor_counts.max():.0f}]")
+
+                # 计算路线相似性矩阵（基于样本相似性 + 时间对齐）
+                print("\n  计算路线相似性矩阵...")
+                self.route_similarity_mat, self.route_neighbor_counts = compute_route_similarity_from_sample_similarity(
+                    similarity_mat,
+                    self.train_route_indices,
+                    self.train_time_indices,
+                    self.num_routes,
+                    method='time_aligned',  # 新方案：基于时间对齐的聚合
+                    sample_importances=None,  # 新方案不使用样本重要性
+                    k_neighbors=self.k_neighbors  # 保留参数以兼容
+                )
+
+                # 保存路线相似性信息
+                route_similarity_file = os.path.join(self.save_dir, 'route_similarity_mat.npy')
+                np.save(route_similarity_file, self.route_similarity_mat)
+                print(f"  路线相似性矩阵已保存: {route_similarity_file}")
+
+                route_neighbor_counts_file = os.path.join(self.save_dir, 'route_neighbor_counts.npy')
+                np.save(route_neighbor_counts_file, self.route_neighbor_counts)
+                print(f"  路线邻居数量已保存: {route_neighbor_counts_file}")
+            else:
+                self.similarity_mat = None
+                self.k_nearest_indices = None
+                self.neighbor_counts = None
+                self.route_similarity_mat = None
+                self.route_neighbor_counts = None
 
         # 恢复训练模式
         self.model.train()
@@ -819,6 +885,115 @@ class OnlineCostCoLearner:
         print(f"  每行样本数量已保存: {route_count_file}")
 
         return route_importances
+
+    def analyze_similarity_among_top_routes(self, top_route_indices, route_importances, top_k=10):
+        """
+        分析最重要路线之间的相似性
+
+        对于每条最重要路线，找出其top_k相似路线，检查这些相似路线是否也在最重要路线集合中
+
+        Args:
+            top_route_indices: 最重要路线的索引列表
+            route_importances: 所有路线的重要性
+            top_k: 每条路线检查前k个相似路线
+        """
+        if self.route_similarity_mat is None:
+            print("  路线相似性矩阵未计算，跳过相似性分析")
+            return
+
+        print("\n【分析最重要路线之间的相似性】")
+        print(f"  最重要路线数量: {len(top_route_indices)}")
+        print(f"  检查每条路线的前{top_k}个相似路线")
+
+        # 将最重要路线转换为集合，方便快速查找
+        top_route_set = set(top_route_indices)
+
+        # 用于存储结果
+        similar_pairs = []
+        route_similar_count = {}
+
+        # 对每条最重要路线进行分析
+        for i, route_a in enumerate(top_route_indices):
+            # 获取路线a的相似性向量
+            similarity_vector = self.route_similarity_mat[route_a, :]
+
+            # 找到top_k最相似的路线（不包括自己，因为自相似性是-1）
+            # 使用argsort找到相似度最高的k个索引
+            top_k_indices = np.argsort(similarity_vector)[-top_k:]
+
+            # 从后往前遍历（相似度从高到低）
+            for route_b in reversed(top_k_indices):
+                if route_b == route_a:
+                    continue  # 跳过自己
+
+                # 检查路线b是否也在最重要路线集合中
+                if route_b in top_route_set:
+                    # 记录这一对路线
+                    similarity_score = similarity_vector[route_b]
+                    similar_pairs.append({
+                        'route_a': route_a,
+                        'route_b': route_b,
+                        'similarity': similarity_score,
+                        'importance_a': route_importances[route_a],
+                        'importance_b': route_importances[route_b]
+                    })
+
+                    # 统计每条路线与其他重要路线的相似数量
+                    if route_a not in route_similar_count:
+                        route_similar_count[route_a] = 0
+                    route_similar_count[route_a] += 1
+
+        # 输出所有符合条件的路线对
+        print(f"\n  共找到 {len(similar_pairs)} 对重要路线之间的相似关系:")
+        print("-" * 100)
+
+        if len(similar_pairs) > 0:
+            for i, pair in enumerate(similar_pairs, 1):
+                print(f"  {i}. 最重要的 {pair['route_a']} 路线与 {pair['route_b']} 路线相似，两条路线都属于最重要的行")
+                print(f"     相似度: {pair['similarity']:.6f}")
+                print(f"     路线{pair['route_a']}重要性: {pair['importance_a']:.6f}")
+                print(f"     路线{pair['route_b']}重要性: {pair['importance_b']:.6f}")
+                print()
+        else:
+            print("  没有找到重要路线之间的相似关系（重要路线之间彼此不相似）")
+
+        print("-" * 100)
+
+        # 统计信息
+        print(f"\n  统计信息:")
+        if route_similar_count:
+            avg_similar_count = sum(route_similar_count.values()) / len(route_similar_count)
+            print(f"    平均每条重要路线与其他重要路线相似的数量: {avg_similar_count:.2f}")
+            print(f"    与其他重要路线相似数量最多的路线:")
+            max_similar = max(route_similar_count.items(), key=lambda x: x[1])
+            print(f"      路线 {max_similar[0]}: 与 {max_similar[1]} 条其他重要路线相似")
+
+        # 保存结果到文件
+        result_file = os.path.join(self.save_dir, 'top_route_similarity_analysis.txt')
+        with open(result_file, 'w', encoding='utf-8') as f:
+            f.write(f"最重要路线之间的相似性分析\n")
+            f.write(f"=" * 80 + "\n\n")
+            f.write(f"最重要路线数量: {len(top_route_indices)}\n")
+            f.write(f"检查每条路线的前{top_k}个相似路线\n\n")
+            f.write(f"共找到 {len(similar_pairs)} 对重要路线之间的相似关系:\n")
+            f.write("-" * 100 + "\n\n")
+
+            for i, pair in enumerate(similar_pairs, 1):
+                f.write(f"{i}. 最重要的 {pair['route_a']} 路线与 {pair['route_b']} 路线相似，两条路线都属于最重要的行\n")
+                f.write(f"   相似度: {pair['similarity']:.6f}\n")
+                f.write(f"   路线{pair['route_a']}重要性: {pair['importance_a']:.6f}\n")
+                f.write(f"   路线{pair['route_b']}重要性: {pair['importance_b']:.6f}\n\n")
+
+            if route_similar_count:
+                avg_similar_count = sum(route_similar_count.values()) / len(route_similar_count)
+                f.write(f"\n统计信息:\n")
+                f.write(f"  平均每条重要路线与其他重要路线相似的数量: {avg_similar_count:.2f}\n")
+                max_similar = max(route_similar_count.items(), key=lambda x: x[1])
+                f.write(f"  与其他重要路线相似数量最多的路线: {max_similar[0]} (与{max_similar[1]}条其他重要路线相似)\n")
+
+        print(f"\n  分析结果已保存到: {result_file}")
+
+        return similar_pairs
 
     def prepare_training_data_from_routes(self, selected_route_indices):
         """
@@ -913,7 +1088,7 @@ class OnlineCostCoLearner:
         self.model.train()
 
         print(f"  训练样本数: {num_train}, 验证样本数: {num_val}")
-        print(f"  收敛判断: 连续 {self.patience} 轮验证损失变化幅度（绝对值）< {self.min_delta:.6f} 则停止")
+        print(f"  收敛判断: 连续 {self.patience} 轮验证损失没有下降则停止")
         print(f"  固定学习率: {self.optimizer.param_groups[0]['lr']:.2e}")
 
         for epoch in range(epochs):
@@ -943,17 +1118,19 @@ class OnlineCostCoLearner:
             train_loss_history.append(avg_train_loss)
             val_loss_history.append(avg_val_loss)
 
-            # 判断是否收敛（基于验证损失的变化幅度绝对值）
+            # 判断是否收敛（基于验证损失的下降，与阶段1保持一致）
             is_best = False
-            val_loss_change = abs(avg_val_loss - best_val_loss)
-            if val_loss_change >= self.min_delta:
-                # 验证损失有显著变化（下降或上升），更新最佳损失并重置计数器
+            if avg_val_loss < best_val_loss:
+                # 只有验证损失下降时才更新最佳损失并重置计数器
                 best_val_loss = avg_val_loss
                 patience_counter = 0
                 is_best = True
             else:
-                # 验证损失趋于平稳，计数器+1
+                # 验证损失没有下降，计数器+1
                 patience_counter += 1
+
+            # 计算损失变化幅度（用于日志显示）
+            val_loss_change = abs(avg_val_loss - best_val_loss)
 
             if verbose and (epoch + 1) % 5 == 0:
                 print(f"  Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
@@ -961,7 +1138,7 @@ class OnlineCostCoLearner:
 
             # 早停判断
             if patience_counter >= self.patience:
-                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮变化幅度（绝对值）< {self.min_delta:.6f}")
+                print(f"\n  模型收敛！验证损失连续 {self.patience} 轮没有下降")
                 print(f"  最终训练损失: {avg_train_loss:.6f}")
                 print(f"  最终验证损失: {avg_val_loss:.6f}")
                 print(f"  最佳验证损失: {best_val_loss:.6f}")
@@ -1142,6 +1319,10 @@ class OnlineCostCoLearner:
         # 实验1: 使用 40% 最重要的行（使用阶段1模型初始化）
         print("\n" + "-"*80)
         top_route_indices = np.argsort(route_importances)[-num_top_routes:]
+
+        # 分析最重要路线之间的相似性
+        self.analyze_similarity_among_top_routes(top_route_indices, route_importances, top_k=self.top_similar_routes)
+
         result_top = self.experiment_with_routes(top_route_indices, f"实验1：{self.route_selection_ratio*100:.0f}% 最重要的行", use_stage1_init=True)
 
         # 实验2: 随机选择指定比例的行（随机初始化，不使用阶段1模型）
@@ -1613,20 +1794,20 @@ def main():
             # 训练参数
             'lr': 1e-3,
             'weight_decay': 1e-7,
-            'epochs_per_step': 50,  # 优化：减少最大epoch数，由早停机制决定实际训练轮数
-            'stage2_epochs': 30,  # 优化：阶段2训练epoch数，也由早停机制决定
+            'epochs_per_step': 100,  # 优化：减少最大epoch数，由早停机制决定实际训练轮数
+            'stage2_epochs': 100,  # 优化：阶段2训练epoch数，也由早停机制决定
             'loss_type': 'mae',
 
-            # 收敛判断参数（优化：更激进的早停）
-            'patience': 5,  # 优化：减少耐心值，更快收敛
-            'min_delta': 1e-3,  # 优化：提高阈值，避免过度训练
-            'val_split': 0.2,  # 优化：减少验证集比例，增加训练数据
+            # 收敛判断参数
+            'patience': 10,  # 验证损失连续N轮没有下降则停止
+            'val_split': 0.2,  # 验证集比例
 
             # 相似性计算参数
             'use_similarity': True,  # 是否计算样本相似性（禁用以避免内存爆炸：True会计算N×N矩阵，需要300GB+内存）
             'k_neighbors': 5,  # k近邻数量
             'similarity_threshold': 0.8,  # 相似性阈值（用于硬邻居计数）
             'max_similarity_samples': 50000,  # 最大样本数限制（避免内存溢出）
+            'top_similar_routes': 1,  # 分析最重要路线相似性时，检查每条路线的前top个相似路线
 
             # 代表点配置
             'use_representer': True,  # 使用代表点
