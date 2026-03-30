@@ -1,0 +1,230 @@
+/home/xuke/.conda/envs/represent/bin/python /home/xuke/zdh/Representer_Point_Selection-master/NetData/CostCO/calculate_cosine_similarity.py
+================================================================================
+Cosine Similarity Calculation Program
+================================================================================
+
+Configuration parameters:
+  Ground truth data file: ./output/Geant_23_23_3000_normalized.npy
+  Result directory: ./Result_Geant_23_23_3000_normalized_25
+  Time point range: 50 - 69 (Total 20 time points)
+  Output directory: ./Result_Geant_23_23_3000_normalized_25
+Loading ground truth data: ./output/Geant_23_23_3000_normalized.npy
+  Data shape: (529, 3000)
+  Data type: float64
+  Data range: [0.0000, 1.0000]
+
+Loading exp1 prediction data...
+  Loaded predictions_t50.npy, shape: (529,)
+  Loaded predictions_t51.npy, shape: (529,)
+  Loaded predictions_t52.npy, shape: (529,)
+  Loaded predictions_t53.npy, shape: (529,)
+  Loaded predictions_t54.npy, shape: (529,)
+  Loaded predictions_t55.npy, shape: (529,)
+  Loaded predictions_t56.npy, shape: (529,)
+  Loaded predictions_t57.npy, shape: (529,)
+  Loaded predictions_t58.npy, shape: (529,)
+  Loaded predictions_t59.npy, shape: (529,)
+  Loaded predictions_t60.npy, shape: (529,)
+  Loaded predictions_t61.npy, shape: (529,)
+  Loaded predictions_t62.npy, shape: (529,)
+  Loaded predictions_t63.npy, shape: (529,)
+  Loaded predictions_t64.npy, shape: (529,)
+  Loaded predictions_t65.npy, shape: (529,)
+  Loaded predictions_t66.npy, shape: (529,)
+  Loaded predictions_t67.npy, shape: (529,)
+  Loaded predictions_t68.npy, shape: (529,)
+  Loaded predictions_t69.npy, shape: (529,)
+
+Loading exp2 prediction data...
+  Loaded predictions_t50.npy, shape: (529,)
+  Loaded predictions_t51.npy, shape: (529,)
+  Loaded predictions_t52.npy, shape: (529,)
+  Loaded predictions_t53.npy, shape: (529,)
+  Loaded predictions_t54.npy, shape: (529,)
+  Loaded predictions_t55.npy, shape: (529,)
+  Loaded predictions_t56.npy, shape: (529,)
+  Loaded predictions_t57.npy, shape: (529,)
+  Loaded predictions_t58.npy, shape: (529,)
+  Loaded predictions_t59.npy, shape: (529,)
+  Loaded predictions_t60.npy, shape: (529,)
+  Loaded predictions_t61.npy, shape: (529,)
+  Loaded predictions_t62.npy, shape: (529,)
+  Loaded predictions_t63.npy, shape: (529,)
+  Loaded predictions_t64.npy, shape: (529,)
+  Loaded predictions_t65.npy, shape: (529,)
+  Loaded predictions_t66.npy, shape: (529,)
+  Loaded predictions_t67.npy, shape: (529,)
+  Loaded predictions_t68.npy, shape: (529,)
+  Loaded predictions_t69.npy, shape: (529,)
+
+Loading exp3 prediction data...
+  Loaded predictions_t50.npy, shape: (529,)
+  Loaded predictions_t51.npy, shape: (529,)
+  Loaded predictions_t52.npy, shape: (529,)
+  Loaded predictions_t53.npy, shape: (529,)
+  Loaded predictions_t54.npy, shape: (529,)
+  Loaded predictions_t55.npy, shape: (529,)
+  Loaded predictions_t56.npy, shape: (529,)
+  Loaded predictions_t57.npy, shape: (529,)
+  Loaded predictions_t58.npy, shape: (529,)
+  Loaded predictions_t59.npy, shape: (529,)
+  Loaded predictions_t60.npy, shape: (529,)
+  Loaded predictions_t61.npy, shape: (529,)
+  Loaded predictions_t62.npy, shape: (529,)
+  Loaded predictions_t63.npy, shape: (529,)
+  Loaded predictions_t64.npy, shape: (529,)
+  Loaded predictions_t65.npy, shape: (529,)
+  Loaded predictions_t66.npy, shape: (529,)
+  Loaded predictions_t67.npy, shape: (529,)
+  Loaded predictions_t68.npy, shape: (529,)
+  Loaded predictions_t69.npy, shape: (529,)
+
+Loading exp4 prediction data...
+  Loaded predictions_t50.npy, shape: (529,)
+  Loaded predictions_t51.npy, shape: (529,)
+  Loaded predictions_t52.npy, shape: (529,)
+  Loaded predictions_t53.npy, shape: (529,)
+  Loaded predictions_t54.npy, shape: (529,)
+  Loaded predictions_t55.npy, shape: (529,)
+  Loaded predictions_t56.npy, shape: (529,)
+  Loaded predictions_t57.npy, shape: (529,)
+  Loaded predictions_t58.npy, shape: (529,)
+  Loaded predictions_t59.npy, shape: (529,)
+  Loaded predictions_t60.npy, shape: (529,)
+  Loaded predictions_t61.npy, shape: (529,)
+  Loaded predictions_t62.npy, shape: (529,)
+  Loaded predictions_t63.npy, shape: (529,)
+  Loaded predictions_t64.npy, shape: (529,)
+  Loaded predictions_t65.npy, shape: (529,)
+  Loaded predictions_t66.npy, shape: (529,)
+  Loaded predictions_t67.npy, shape: (529,)
+  Loaded predictions_t68.npy, shape: (529,)
+  Loaded predictions_t69.npy, shape: (529,)
+
+Starting cosine similarity calculation...
+================================================================================
+
+[exp1]
+    t50: Cosine similarity = 0.882818, Valid = 455, NaN = 0, Zero = 74
+    t51: Cosine similarity = 0.880537, Valid = 449, NaN = 0, Zero = 80
+    t52: Cosine similarity = 0.857137, Valid = 454, NaN = 0, Zero = 75
+    t53: Cosine similarity = 0.818022, Valid = 451, NaN = 0, Zero = 78
+    t54: Cosine similarity = 0.873776, Valid = 453, NaN = 0, Zero = 76
+    t55: Cosine similarity = 0.881765, Valid = 462, NaN = 0, Zero = 67
+    t56: Cosine similarity = 0.885871, Valid = 453, NaN = 0, Zero = 76
+    t57: Cosine similarity = 0.886341, Valid = 458, NaN = 0, Zero = 71
+    t58: Cosine similarity = 0.887645, Valid = 461, NaN = 0, Zero = 68
+    t59: Cosine similarity = 0.895971, Valid = 455, NaN = 0, Zero = 74
+    t60: Cosine similarity = 0.812140, Valid = 460, NaN = 0, Zero = 69
+    t61: Cosine similarity = 0.865324, Valid = 464, NaN = 0, Zero = 65
+    t62: Cosine similarity = 0.866998, Valid = 461, NaN = 0, Zero = 68
+    t63: Cosine similarity = 0.854946, Valid = 468, NaN = 0, Zero = 61
+    t64: Cosine similarity = 0.852288, Valid = 469, NaN = 0, Zero = 60
+    t65: Cosine similarity = 0.841840, Valid = 472, NaN = 0, Zero = 57
+    t66: Cosine similarity = 0.840276, Valid = 474, NaN = 0, Zero = 55
+    t67: Cosine similarity = 0.889898, Valid = 474, NaN = 0, Zero = 55
+    t68: Cosine similarity = 0.875653, Valid = 472, NaN = 0, Zero = 57
+    t69: Cosine similarity = 0.892716, Valid = 471, NaN = 0, Zero = 58
+
+[exp2]
+    t50: Cosine similarity = 0.485115, Valid = 455, NaN = 0, Zero = 74
+    t51: Cosine similarity = 0.514347, Valid = 449, NaN = 0, Zero = 80
+    t52: Cosine similarity = 0.505293, Valid = 454, NaN = 0, Zero = 75
+    t53: Cosine similarity = 0.472122, Valid = 451, NaN = 0, Zero = 78
+    t54: Cosine similarity = 0.504433, Valid = 453, NaN = 0, Zero = 76
+    t55: Cosine similarity = 0.538424, Valid = 462, NaN = 0, Zero = 67
+    t56: Cosine similarity = 0.505729, Valid = 453, NaN = 0, Zero = 76
+    t57: Cosine similarity = 0.504447, Valid = 458, NaN = 0, Zero = 71
+    t58: Cosine similarity = 0.506274, Valid = 461, NaN = 0, Zero = 68
+    t59: Cosine similarity = 0.535439, Valid = 455, NaN = 0, Zero = 74
+    t60: Cosine similarity = 0.527705, Valid = 460, NaN = 0, Zero = 69
+    t61: Cosine similarity = 0.536396, Valid = 464, NaN = 0, Zero = 65
+    t62: Cosine similarity = 0.534299, Valid = 461, NaN = 0, Zero = 68
+    t63: Cosine similarity = 0.519322, Valid = 468, NaN = 0, Zero = 61
+    t64: Cosine similarity = 0.534068, Valid = 469, NaN = 0, Zero = 60
+    t65: Cosine similarity = 0.528480, Valid = 472, NaN = 0, Zero = 57
+    t66: Cosine similarity = 0.510024, Valid = 474, NaN = 0, Zero = 55
+    t67: Cosine similarity = 0.519738, Valid = 474, NaN = 0, Zero = 55
+    t68: Cosine similarity = 0.507636, Valid = 472, NaN = 0, Zero = 57
+    t69: Cosine similarity = 0.519811, Valid = 471, NaN = 0, Zero = 58
+
+[exp3]
+    t50: Cosine similarity = 0.890033, Valid = 455, NaN = 0, Zero = 74
+    t51: Cosine similarity = 0.874802, Valid = 449, NaN = 0, Zero = 80
+    t52: Cosine similarity = 0.853725, Valid = 454, NaN = 0, Zero = 75
+    t53: Cosine similarity = 0.814386, Valid = 451, NaN = 0, Zero = 78
+    t54: Cosine similarity = 0.874723, Valid = 453, NaN = 0, Zero = 76
+    t55: Cosine similarity = 0.875539, Valid = 462, NaN = 0, Zero = 67
+    t56: Cosine similarity = 0.886500, Valid = 453, NaN = 0, Zero = 76
+    t57: Cosine similarity = 0.877369, Valid = 458, NaN = 0, Zero = 71
+    t58: Cosine similarity = 0.884737, Valid = 461, NaN = 0, Zero = 68
+    t59: Cosine similarity = 0.896089, Valid = 455, NaN = 0, Zero = 74
+    t60: Cosine similarity = 0.804213, Valid = 460, NaN = 0, Zero = 69
+    t61: Cosine similarity = 0.868664, Valid = 464, NaN = 0, Zero = 65
+    t62: Cosine similarity = 0.864552, Valid = 461, NaN = 0, Zero = 68
+    t63: Cosine similarity = 0.843690, Valid = 468, NaN = 0, Zero = 61
+    t64: Cosine similarity = 0.845058, Valid = 469, NaN = 0, Zero = 60
+    t65: Cosine similarity = 0.835984, Valid = 472, NaN = 0, Zero = 57
+    t66: Cosine similarity = 0.846750, Valid = 474, NaN = 0, Zero = 55
+    t67: Cosine similarity = 0.893013, Valid = 474, NaN = 0, Zero = 55
+    t68: Cosine similarity = 0.876988, Valid = 472, NaN = 0, Zero = 57
+    t69: Cosine similarity = 0.896196, Valid = 471, NaN = 0, Zero = 58
+
+[exp4]
+    t50: Cosine similarity = 0.885207, Valid = 455, NaN = 0, Zero = 74
+    t51: Cosine similarity = 0.879600, Valid = 449, NaN = 0, Zero = 80
+    t52: Cosine similarity = 0.859564, Valid = 454, NaN = 0, Zero = 75
+    t53: Cosine similarity = 0.816473, Valid = 451, NaN = 0, Zero = 78
+    t54: Cosine similarity = 0.872370, Valid = 453, NaN = 0, Zero = 76
+    t55: Cosine similarity = 0.885128, Valid = 462, NaN = 0, Zero = 67
+    t56: Cosine similarity = 0.895551, Valid = 453, NaN = 0, Zero = 76
+    t57: Cosine similarity = 0.882327, Valid = 458, NaN = 0, Zero = 71
+    t58: Cosine similarity = 0.890153, Valid = 461, NaN = 0, Zero = 68
+    t59: Cosine similarity = 0.894950, Valid = 455, NaN = 0, Zero = 74
+    t60: Cosine similarity = 0.813073, Valid = 460, NaN = 0, Zero = 69
+    t61: Cosine similarity = 0.862329, Valid = 464, NaN = 0, Zero = 65
+    t62: Cosine similarity = 0.872028, Valid = 461, NaN = 0, Zero = 68
+    t63: Cosine similarity = 0.849016, Valid = 468, NaN = 0, Zero = 61
+    t64: Cosine similarity = 0.847566, Valid = 469, NaN = 0, Zero = 60
+    t65: Cosine similarity = 0.839865, Valid = 472, NaN = 0, Zero = 57
+    t66: Cosine similarity = 0.836253, Valid = 474, NaN = 0, Zero = 55
+    t67: Cosine similarity = 0.894326, Valid = 474, NaN = 0, Zero = 55
+    t68: Cosine similarity = 0.866615, Valid = 472, NaN = 0, Zero = 57
+    t69: Cosine similarity = 0.895068, Valid = 471, NaN = 0, Zero = 58
+
+Results saved to: ./Result_Geant_23_23_3000_normalized_25/cosine_similarity_results.npy
+Summary results saved to: ./Result_Geant_23_23_3000_normalized_25/cosine_similarity_summary.txt
+Trend plot saved to: ./Result_Geant_23_23_3000_normalized_25/cosine_similarity_trend.png
+Comparison plot saved to: ./Result_Geant_23_23_3000_normalized_25/cosine_similarity_comparison.png
+
+================================================================================
+Calculation Complete!
+================================================================================
+
+[Summary Results]
+Exp1 (Mixed):
+  Mean cosine similarity: 0.867098
+  Standard deviation: 0.023634
+  Range: [0.812140, 0.895971]
+  Valid time points: 20/20
+
+Exp2 (Random):
+  Mean cosine similarity: 0.515455
+  Standard deviation: 0.017108
+  Range: [0.472122, 0.538424]
+  Valid time points: 20/20
+
+Exp3 (Important+Random):
+  Mean cosine similarity: 0.865151
+  Standard deviation: 0.025715
+  Range: [0.804213, 0.896196]
+  Valid time points: 20/20
+
+Exp4 (Important):
+  Mean cosine similarity: 0.866873
+  Standard deviation: 0.025195
+  Range: [0.813073, 0.895551]
+  Valid time points: 20/20
+
+
+Process finished with exit code 0

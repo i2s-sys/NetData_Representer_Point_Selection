@@ -26,12 +26,12 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
 class CostCo_Matrix(nn.Module):
-    """ 
+    """
     CostCo 模型 - 2 个卷积版本
     """
     def __init__(self, num_routes, num_time, embedding_dim, nc=100):
         super(CostCo_Matrix, self).__init__()
-        
+
         # 两个嵌入层
         self.route_embeddings = nn.Embedding(num_routes, embedding_dim)
         self.time_embeddings = nn.Embedding(num_time, embedding_dim)
@@ -42,29 +42,29 @@ class CostCo_Matrix(nn.Module):
 
         # 全连接层
         self.fc1 = nn.Linear(nc, 1)
-    
+
     def forward(self, route_idx, time_idx):
         batch_size = route_idx.size(0)
-        
+
         # 确保索引是正确的形状
         if route_idx.dim() == 0:
             route_idx = route_idx.view(-1)  # 转换为 1D
         time_idx = time_idx.view(-1)
-        
+
         # 获取嵌入
         route_embeds = self.route_embeddings(route_idx)
         time_embeds = self.time_embeddings(time_idx)
-        
+
         # 拼接
         H = torch.cat((route_embeds.unsqueeze(1), time_embeds.unsqueeze(1)), 1)
         H = H.unsqueeze(1)
-        
+
         # 卷积
         x = torch.relu(self.conv1(H))
         x = torch.relu(self.conv2(x))
         x = x.view(batch_size, -1)
         x = self.fc1(x)
-        
+
         return x
 
 
@@ -72,7 +72,7 @@ class CustomLoss(nn.Module):
     def __init__(self, loss_type='mae'):
         super(CustomLoss, self).__init__()
         self.loss_type = loss_type
-    
+
     def forward(self, y_pred, y_true):
         if self.loss_type == 'mae':
             loss = torch.abs(y_pred - y_true)
@@ -174,23 +174,25 @@ def compute_sample_importance_gradient(model, route_idx, time_idx, criterion, va
     return sample_importances, sample_grads, grad_info
 
 # ==================== 样本相似性计算（优化版：GPU加速+向量化）====================
-def compute_similarity_from_grads(sample_grads, similarity_threshold=0.8, max_samples=50000):
+def compute_similarity_from_grads(sample_grads, k_neighbors=5, similarity_threshold=0.8, max_samples=50000):
     """
     基于已计算的梯度向量计算样本相似性矩阵
     优化：使用GPU加速和向量化计算，限制最大样本数以避免内存溢出
 
     Args:
         sample_grads: 样本梯度向量 [N, 2*embedding_dim]
+        k_neighbors: k近邻数量
         similarity_threshold: 相似性阈值（用于硬邻居计数）
         max_samples: 最大样本数限制（避免内存溢出）
 
     Returns:
         similarity_mat: 相似性矩阵 [N, N] 或 [N_sampled, N_sampled]
+        k_nearest_indices: 每个样本的k个最近邻索引 [N, k] 或 [N_sampled, k]
         neighbor_counts: 每个样本的邻居数量 [N] 或 [N_sampled]
         sampled_indices: 采样的样本索引（如果进行了采样）
     """
     num_samples = len(sample_grads)
-    
+
     # 如果样本数量超过限制，进行随机采样
     if num_samples > max_samples:
         print(f"  样本数量 {num_samples} 超过限制 {max_samples}，进行随机采样...")
@@ -225,13 +227,24 @@ def compute_similarity_from_grads(sample_grads, similarity_threshold=0.8, max_sa
     print(f"  相似性矩阵形状: {similarity_mat.shape}")
     print(f"  相似性范围: [{similarity_mat.min():.6f}, {similarity_mat.max():.6f}]")
 
+    # 使用向量化方法找到k个最相似的邻居（避免循环）
+    # 对每行找到最大的k个值的索引
+    similarity_mat_tensor = torch.from_numpy(similarity_mat).to(device)
+    k_nearest_indices_tensor = torch.topk(similarity_mat_tensor, k=k_neighbors, dim=1).indices
+    k_nearest_indices = k_nearest_indices_tensor.cpu().numpy()
+
+    # 如果进行了采样，需要将索引映射回原始样本
+    if sampled_indices is not None:
+        k_nearest_indices = sampled_indices[k_nearest_indices]
+
     # 计算每个样本的邻居数量（基于阈值，向量化）
     neighbor_counts = (similarity_mat > similarity_threshold).sum(axis=1)
 
+    print(f"  k近邻索引形状: {k_nearest_indices.shape}")
     print(f"  邻居数量范围: [{neighbor_counts.min():.0f}, {neighbor_counts.max():.0f}]")
     print(f"  相似性计算完成!")
 
-    return similarity_mat, neighbor_counts, sampled_indices
+    return similarity_mat, k_nearest_indices, neighbor_counts, sampled_indices
 
 
 # ==================== 路线相似性计算（基于样本相似性 + 时间对齐）====================
@@ -259,6 +272,7 @@ def compute_route_similarity_from_sample_similarity(
             - 'min': 最小相似性
             - 'weighted_mean': 加权平均（基于样本重要性）
         sample_importances: 样本重要性 [N_samples]，用于加权平均
+        k_neighbors: k近邻数量（保留参数以兼容旧接口）
 
     Returns:
         route_similarity_mat: 路线相似性矩阵 [num_routes, num_routes]
@@ -448,9 +462,9 @@ def random_sampling_with_representer(matrix_data, seed_num, sample_rate=0.8, min
     """
     np.random.seed(seed_num)
     torch.manual_seed(seed_num)
-    
+
     num_routes, num_time = matrix_data.shape
-    
+
     # 先找到所有有效位置（非0非NaN）
     valid_positions = []
     for r in range(num_routes):
@@ -458,26 +472,26 @@ def random_sampling_with_representer(matrix_data, seed_num, sample_rate=0.8, min
             val = matrix_data[r, t]
             if not np.isnan(val) and val != 0:
                 valid_positions.append((r, t, val))
-    
+
     num_valid = len(valid_positions)
-    
+
     if num_valid == 0:
         print("  警告: 没有找到有效样本（非0非NaN）")
         return []
-    
+
     # 从有效位置中采样
     num_train = int(num_valid * sample_rate)
     num_train = max(num_train, min_train_samples)
-    
+
     # 如果有效样本数少于需要的训练样本数，使用所有有效样本
     if num_train > num_valid:
         num_train = num_valid
         print(f"  警告: 有效样本数({num_valid})少于期望的训练样本数，使用所有有效样本")
-    
+
     # 随机选择样本
     selected_indices = np.random.choice(num_valid, num_train, replace=False)
     train_samples = [valid_positions[i] for i in selected_indices]
-    
+
     return train_samples
 
 
@@ -489,7 +503,7 @@ class OnlineCostCoLearner:
     def __init__(self, matrix_data, config):
         self.matrix_data = matrix_data
         self.num_routes, self.num_time = matrix_data.shape
-        
+
         # 配置
         self.embedding_dim = config.get('embedding_dim', 64)
         self.nc = config.get('nc', 128)
@@ -501,18 +515,18 @@ class OnlineCostCoLearner:
         self.history_end = min(self.history_end, self.num_time)
         self.save_dir = config.get('save_dir', './online_results_representer')
         self.top_level_dir = config.get('top_level_dir', './online_results_representer')  # 顶层目录，用于统一保存预测结果和模型
-        self.sample_rate = config.get('sample_rate', 1)
+        self.sample_rate = config.get('sample_rate', 0.8)
         self.loss_type = config.get('loss_type', 'mae')
         self.global_seed = config.get('global_seed', 42)
         self.min_train_samples = config.get('min_train_samples', 100)
         self.use_representer = config.get('use_representer', True)
         self.representer_method = config.get('representer_method', 'gradient')
         self.route_selection_ratio = config.get('route_selection_ratio', 0.1)  # 总路线选择比例
-        self.top_route_ratio = self.route_selection_ratio * 0.8  # 最重要路线的比例（总路线选择比例的4/5）
-        self.random_route_ratio = self.route_selection_ratio * 0.2  # 从随机路线中选择的比例（总路线选择比例的1/5）
+        self.top_route_ratio = config.get('top_route_ratio', 0.09)  # 最重要路线的比例（8%）
+        self.random_route_ratio = config.get('random_route_ratio', 0.01)  # 从随机路线中选择的比例（2%）
         self.dissimilar_threshold = config.get('dissimilar_threshold', 0.0)  # 不相似阈值
-        self.exp3_random_ratio = self.route_selection_ratio * 0.2  # 实验3：从重要路线中选择的随机路线比例（与random_route_ratio相同）
-        self.exp4_importance_ratio = self.route_selection_ratio  # 实验4：重要路线比例（与总路线选择比例相同）
+        self.exp3_random_ratio = config.get('exp3_random_ratio', 0.01)  # 实验3：从重要路线中选择的随机路线比例（2%）
+        self.exp4_importance_ratio = config.get('exp4_importance_ratio', 0.1)  # 实验4：重要路线比例（10%）
         self.stage2_epochs = config.get('stage2_epochs', 100)  # 阶段2（实验阶段）训练的epoch数
         # 收敛判断参数
         self.patience = config.get('patience', 10)  # 验证损失连续N轮没有下降就认为收敛
@@ -520,6 +534,7 @@ class OnlineCostCoLearner:
 
         # 相似性计算参数
         self.use_similarity = config.get('use_similarity', True)  # 是否计算样本相似性
+        self.k_neighbors = config.get('k_neighbors', 5)  # k近邻数量
         self.similarity_threshold = config.get('similarity_threshold', 0.8)  # 相似性阈值（用于硬邻居计数）
         self.max_similarity_samples = config.get('max_similarity_samples', 50000)  # 最大样本数限制（避免内存溢出）
         self.top_similar_routes = config.get('top_similar_routes', 3)  # 分析最重要路线相似性时，检查每条路线的前top个相似路线
@@ -527,41 +542,31 @@ class OnlineCostCoLearner:
         os.makedirs(self.save_dir, exist_ok=True)
 
         # 创建顶层预测结果保存目录（统一管理所有时间点的预测结果，基于顶层目录）
-        self.exp1_predictions_dir = os.path.join(self.top_level_dir, 'predictions_exp1')
-        self.exp2_predictions_dir = os.path.join(self.top_level_dir, 'predictions_exp2')
-        self.exp3_predictions_dir = os.path.join(self.top_level_dir, 'predictions_exp3')
-        self.exp4_predictions_dir = os.path.join(self.top_level_dir, 'predictions_exp4')
-        os.makedirs(self.exp1_predictions_dir, exist_ok=True)
-        os.makedirs(self.exp2_predictions_dir, exist_ok=True)
-        os.makedirs(self.exp3_predictions_dir, exist_ok=True)
-        os.makedirs(self.exp4_predictions_dir, exist_ok=True)
-        
+        self.top_predictions_dir = os.path.join(self.top_level_dir, 'predictions_top_routes')
+        self.random_predictions_dir = os.path.join(self.top_level_dir, 'predictions_random_routes')
+        os.makedirs(self.top_predictions_dir, exist_ok=True)
+        os.makedirs(self.random_predictions_dir, exist_ok=True)
+
         self.predictions = []
         self.ground_truth = []
         self.prediction_errors = []
-        
+
         self.model = None
         self.history = []
         self.training_data = None
         self.sample_importances = None
         self.route_importances = None
         self.train_route_indices = None  # 训练样本的路线索引
-        
-        # 在初始化时设置随机种子
-        self.set_seed(self.global_seed)
-    
+
     def set_seed(self, seed=None):
-        """设置固定随机种子以确保结果可复现"""
+        """设置固定随机种子"""
         if seed is None:
             seed = self.global_seed
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-    
+
     def create_model(self):
         """创建模型"""
         model = CostCo_Matrix(
@@ -570,16 +575,16 @@ class OnlineCostCoLearner:
             embedding_dim=self.embedding_dim,
             nc=self.nc
         ).to(device)
-        
+
         # 初始化优化器
         self.optimizer = optim.Adam(
             model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay
         )
-        
+
         return model
-    
+
     def prepare_training_data(self):
         """准备训练数据"""
         history_data = self.matrix_data[:, :self.history_end]
@@ -615,7 +620,7 @@ class OnlineCostCoLearner:
         print(f"  训练样本比例: {len(train_samples) / (self.num_routes * self.history_end):.2%}")
 
         return route_indices, time_indices, values
-    
+
     def train_model_with_representer(self, epochs=None, verbose=True):
         """
         训练模型 - 使用代表点重要性，支持基于验证损失的早停收敛判断
@@ -669,7 +674,7 @@ class OnlineCostCoLearner:
         # 更新训练样本索引为训练集部分（用于计算行重要性）
         self.train_route_indices = train_route_indices.cpu().numpy()
         self.train_time_indices = train_time_indices.cpu().numpy()
-        
+
         # 保存训练数据供后续使用
         self.train_route_indices_tensor = train_route_indices
         self.train_time_indices_tensor = train_time_indices
@@ -747,7 +752,7 @@ class OnlineCostCoLearner:
         # 模型收敛后，计算样本重要性和相似度矩阵
         if self.use_representer:
             print("\n【模型收敛后计算样本重要性和相似度】")
-            
+
             # 使用收敛后的模型计算样本重要性
             print("  计算样本重要性...")
             sample_importances, sample_grads, grad_info = compute_sample_importance_gradient(
@@ -770,18 +775,21 @@ class OnlineCostCoLearner:
             # 计算样本相似性矩阵（基于收敛后的梯度）
             if self.use_similarity:
                 print("\n  计算样本相似性矩阵...")
-                similarity_mat, neighbor_counts, sampled_indices = compute_similarity_from_grads(
+                similarity_mat, k_nearest_indices, neighbor_counts, sampled_indices = compute_similarity_from_grads(
                     sample_grads,
+                    k_neighbors=self.k_neighbors,
                     similarity_threshold=self.similarity_threshold,
                     max_samples=self.max_similarity_samples
                 )
 
                 # 保存相似性信息
                 self.similarity_mat = similarity_mat
+                self.k_nearest_indices = k_nearest_indices
                 self.neighbor_counts = neighbor_counts
 
                 print(f"  样本相似性计算完成!")
                 print(f"    相似性矩阵形状: {similarity_mat.shape}")
+                print(f"    k近邻索引形状: {k_nearest_indices.shape}")
                 print(f"    邻居数量形状: {neighbor_counts.shape}")
                 print(f"    相似性范围: [{similarity_mat.min():.6f}, {similarity_mat.max():.6f}]")
                 print(f"    邻居数量范围: [{neighbor_counts.min():.0f}, {neighbor_counts.max():.0f}]")
@@ -794,15 +802,21 @@ class OnlineCostCoLearner:
                     self.train_time_indices,
                     self.num_routes,
                     method='time_aligned',  # 新方案：基于时间对齐的聚合
-                    sample_importances=None  # 新方案不使用样本重要性
+                    sample_importances=None,  # 新方案不使用样本重要性
+                    k_neighbors=self.k_neighbors  # 保留参数以兼容
                 )
 
                 # 保存路线相似性信息
                 route_similarity_file = os.path.join(self.save_dir, 'route_similarity_mat.npy')
                 np.save(route_similarity_file, self.route_similarity_mat)
                 print(f"  路线相似性矩阵已保存: {route_similarity_file}")
+
+                route_neighbor_counts_file = os.path.join(self.save_dir, 'route_neighbor_counts.npy')
+                np.save(route_neighbor_counts_file, self.route_neighbor_counts)
+                print(f"  路线邻居数量已保存: {route_neighbor_counts_file}")
             else:
                 self.similarity_mat = None
+                self.k_nearest_indices = None
                 self.neighbor_counts = None
                 self.route_similarity_mat = None
                 self.route_neighbor_counts = None
@@ -1035,7 +1049,7 @@ class OnlineCostCoLearner:
             # 实验3：从重要路线中选择随机路线
             candidate_pool = top_routes
             print(f"  候选路线池大小: {len(candidate_pool)} (从重要路线中选择)")
-            self.set_seed(self.global_seed + 35)
+            np.random.seed(self.global_seed)
             other_routes = np.random.choice(candidate_pool, num_other_routes, replace=False)
             print(f"  已从重要路线中随机选择: {other_routes}")
         else:
@@ -1050,7 +1064,6 @@ class OnlineCostCoLearner:
                 print("  警告: 路线相似性矩阵未计算，使用随机选择")
                 other_routes = np.random.choice(candidate_pool, num_other_routes, replace=False)
             else:
-                original_threshold = self.dissimilar_threshold
                 dissimilar_candidates = []
                 for candidate in candidate_pool:
                     # 检查该候选路线与所有重要路线的相似度
@@ -1065,6 +1078,7 @@ class OnlineCostCoLearner:
                 if len(dissimilar_candidates) < num_other_routes:
                     print(f"  警告: 不相似路线不足 ({len(dissimilar_candidates)} < {num_other_routes})")
                     # 尝试降低阈值
+                    original_threshold = self.dissimilar_threshold
                     while len(dissimilar_candidates) < num_other_routes and self.dissimilar_threshold < 1.0:
                         self.dissimilar_threshold += 0.1
                         dissimilar_candidates = []
@@ -1080,10 +1094,10 @@ class OnlineCostCoLearner:
                         dissimilar_candidates = list(candidate_pool)
 
                     # 恢复原始阈值
-                self.dissimilar_threshold = original_threshold
+                    self.dissimilar_threshold = original_threshold
 
                 # 从不相似路线中随机选择指定数量
-                self.set_seed(self.global_seed + 36)
+                np.random.seed(self.global_seed)
                 if len(dissimilar_candidates) >= num_other_routes:
                     other_routes = np.random.choice(dissimilar_candidates, num_other_routes, replace=False)
                 else:
@@ -1143,7 +1157,7 @@ class OnlineCostCoLearner:
 
         return route_indices, time_indices, values
 
-    def train_model_with_selected_routes(self, selected_route_indices, epochs=None, verbose=True, seed_offset=0):
+    def train_model_with_selected_routes(self, selected_route_indices, epochs=None, verbose=True):
         """
         只使用选定路线的数据重新训练模型，支持基于验证损失的早停收敛判断
         """
@@ -1151,9 +1165,6 @@ class OnlineCostCoLearner:
             epochs = self.epochs_per_step
 
         print(f"  使用选定路线重新训练模型...")
-
-        # 设置随机种子以确保可复现性
-        self.set_seed(self.global_seed + seed_offset)
 
         # 准备训练数据（只使用选定路线）
         route_indices, time_indices, values = self.prepare_training_data_from_routes(selected_route_indices)
@@ -1267,14 +1278,13 @@ class OnlineCostCoLearner:
 
         return avg_train_loss
 
-    def experiment_with_routes(self, route_indices, exp_name, use_stage1_init=True, seed_offset=0):
+    def experiment_with_routes(self, route_indices, exp_name, use_stage1_init=True):
         """使用指定的路线集合进行预测实验
 
         Args:
             route_indices: 选择的路线索引
             exp_name: 实验名称
             use_stage1_init: 是否使用阶段1训练好的模型初始化（True则加载，False则随机初始化）
-            seed_offset: 随机种子偏移量（用于不同实验的随机性控制）
         """
         print(f"\n【{exp_name}】")
         print(f"  使用路线数: {len(route_indices)}")
@@ -1290,9 +1300,6 @@ class OnlineCostCoLearner:
         else:
             print(f"  使用随机初始化（不加载阶段1模型）...")
             print(f"  使用阶段2训练epoch数（早停机制）: {self.stage2_epochs}")
-
-        # 设置随机种子以确保实验的可复现性
-        self.set_seed(self.global_seed + seed_offset)
 
         self.model = self.create_model()  # 创建新的模型
         self.optimizer = optim.Adam(
@@ -1311,7 +1318,7 @@ class OnlineCostCoLearner:
             print(f"  模型已随机初始化，未加载阶段1权重")
 
         # 使用选定路线的数据训练（使用阶段2的epoch数，由早停机制决定实际轮数）
-        final_loss = self.train_model_with_selected_routes(route_indices, epochs=self.stage2_epochs, verbose=True, seed_offset=seed_offset)
+        final_loss = self.train_model_with_selected_routes(route_indices, epochs=self.stage2_epochs, verbose=True)
 
         if final_loss is None:
             print(f"  训练失败，跳过实验")
@@ -1437,28 +1444,28 @@ class OnlineCostCoLearner:
         print("\n" + "-"*80)
         print("【实验1】")
         selected_routes_exp1, top_routes_exp1, dissimilar_routes_exp1 = self.select_mixed_routes(route_importances, from_top_routes=False)
-        result_exp1 = self.experiment_with_routes(selected_routes_exp1, f"实验1：{self.top_route_ratio*100:.0f}% 重要 + {self.random_route_ratio*100:.0f}% 不相似随机", use_stage1_init=True, seed_offset=10)
+        result_exp1 = self.experiment_with_routes(selected_routes_exp1, f"实验1：{self.top_route_ratio*100:.0f}% 重要 + {self.random_route_ratio*100:.0f}% 不相似随机", use_stage1_init=True)
 
         # 实验2: 随机选择指定比例的行（随机初始化，不使用阶段1模型）
         print("\n" + "-"*80)
         print("【实验2】")
-        self.set_seed(self.global_seed + 20)
+        np.random.seed(self.global_seed + 1)
         num_routes_total = int(num_routes * self.route_selection_ratio)
         random_route_indices = np.random.choice(num_routes, num_routes_total, replace=False)
-        result_exp2 = self.experiment_with_routes(random_route_indices, f"实验2：完全随机 {self.route_selection_ratio*100:.0f}% 的行", use_stage1_init=False, seed_offset=20)
+        result_exp2 = self.experiment_with_routes(random_route_indices, f"实验2：完全随机 {self.route_selection_ratio*100:.0f}% 的行", use_stage1_init=False)
 
         # 实验3: 从重要路线中选择随机路线（使用阶段1模型初始化）
         print("\n" + "-"*80)
         print("【实验3】")
         selected_routes_exp3, top_routes_exp3, random_routes_exp3 = self.select_mixed_routes(route_importances, from_top_routes=True)
-        result_exp3 = self.experiment_with_routes(selected_routes_exp3, f"实验3：{self.top_route_ratio*100:.0f}% 重要 + {self.random_route_ratio*100:.0f}% 随机", use_stage1_init=True, seed_offset=30)
+        result_exp3 = self.experiment_with_routes(selected_routes_exp3, f"实验3：{self.top_route_ratio*100:.0f}% 重要 + {self.random_route_ratio*100:.0f}% 随机", use_stage1_init=True)
 
         # 实验4: 选择最重要的10%路线（使用阶段1模型初始化）
         print("\n" + "-"*80)
         print("【实验4】")
         num_routes_exp4 = int(num_routes * self.exp4_importance_ratio)
         top_routes_exp4 = np.argsort(route_importances)[-num_routes_exp4:]
-        result_exp4 = self.experiment_with_routes(top_routes_exp4, f"实验4：{self.exp4_importance_ratio*100:.0f}% 最重要", use_stage1_init=True, seed_offset=40)
+        result_exp4 = self.experiment_with_routes(top_routes_exp4, f"实验4：{self.exp4_importance_ratio*100:.0f}% 最重要", use_stage1_init=True)
 
         # 汇总对比结果
         print("\n" + "="*80)
@@ -1510,32 +1517,32 @@ class OnlineCostCoLearner:
         np.save(results_file, experiment_results)
         print(f"\n实验结果已保存: {results_file}")
 
-        # 单独保存各实验的预测结果到顶层目录
+        # 单独保存实验1和实验2的预测结果到顶层目录
         if result_exp1 and 'predictions' in result_exp1:
-            # 实验1预测结果保存到顶层 predictions_exp1 文件夹
+            # 实验1预测结果保存到顶层 predictions_top_routes 文件夹
             target_time_str = f"t{self.history_end}"
-            exp1_predictions_file = os.path.join(self.exp1_predictions_dir, f'predictions_{target_time_str}.npy')
-            np.save(exp1_predictions_file, result_exp1['predictions'])
-            print(f"实验1（混合策略）预测结果已保存: {exp1_predictions_file}")
+            top_predictions_file = os.path.join(self.top_predictions_dir, f'predictions_{target_time_str}.npy')
+            np.save(top_predictions_file, result_exp1['predictions'])
+            print(f"实验1（混合策略）预测结果已保存: {top_predictions_file}")
 
         if result_exp2 and 'predictions' in result_exp2:
-            # 实验2预测结果保存到顶层 predictions_exp2 文件夹
+            # 实验2预测结果保存到顶层 predictions_random_routes 文件夹
             target_time_str = f"t{self.history_end}"
-            exp2_predictions_file = os.path.join(self.exp2_predictions_dir, f'predictions_{target_time_str}.npy')
-            np.save(exp2_predictions_file, result_exp2['predictions'])
-            print(f"实验2（完全随机）预测结果已保存: {exp2_predictions_file}")
+            random_predictions_file = os.path.join(self.random_predictions_dir, f'predictions_{target_time_str}.npy')
+            np.save(random_predictions_file, result_exp2['predictions'])
+            print(f"实验2（完全随机）预测结果已保存: {random_predictions_file}")
 
         if result_exp3 and 'predictions' in result_exp3:
-            # 实验3预测结果保存到顶层 predictions_exp3 文件夹
+            # 实验3预测结果保存到顶层 predictions_top_routes 文件夹
             target_time_str = f"t{self.history_end}"
-            exp3_predictions_file = os.path.join(self.exp3_predictions_dir, f'predictions_{target_time_str}.npy')
+            exp3_predictions_file = os.path.join(self.top_predictions_dir, f'predictions_{target_time_str}.npy')
             np.save(exp3_predictions_file, result_exp3['predictions'])
             print(f"实验3（重要+随机）预测结果已保存: {exp3_predictions_file}")
 
         if result_exp4 and 'predictions' in result_exp4:
-            # 实验4预测结果保存到顶层 predictions_exp4 文件夹
+            # 实验4预测结果保存到顶层 predictions_top_routes 文件夹
             target_time_str = f"t{self.history_end}"
-            exp4_predictions_file = os.path.join(self.exp4_predictions_dir, f'predictions_{target_time_str}.npy')
+            exp4_predictions_file = os.path.join(self.top_predictions_dir, f'predictions_{target_time_str}.npy')
             np.save(exp4_predictions_file, result_exp4['predictions'])
             print(f"实验4（最重要）预测结果已保存: {exp4_predictions_file}")
 
@@ -1870,34 +1877,14 @@ def plot_summary_results(all_results_summary, save_dir):
 
 def main():
     """主函数 - 执行1000次循环，预测时间点2000-2999"""
-    
-    # ==================== 设置随机种子以确保结果可复现 ====================
-    global_seed = 42  # 可以修改为任意整数
-    np.random.seed(global_seed)
-    torch.manual_seed(global_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(global_seed)
-        torch.cuda.manual_seed_all(global_seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    print(f"全局随机种子已设置为: {global_seed}")
-    print("="*80)
-    
-    # PMU_59_28_4965_normalized PMU_28_28_normalized
-    # Seattle_99_99_688_matrix_col_time_normalized
+    # PMU_59_28_4965_matrix_col_time_normalized 1 Geant_23_23_3000_matrix_col_time_normalized
+    # Seattle_99_99_688_matrix_col_time_normalized 1 Abilene_12_12_3000_matrix_col_time_normalized
     # PlanetLab_489_489_17_matrix_col_time_normalized 需注意时间点比较少 应该测试10-15
     # PlanetLab_matrix_col_time_50_50_normalized 需注意时间点比较少 应该测试10-15
     # Seattle_matrix_col_time_50_50_normalized 时间点多可以测试50-70
     # Seattle_matrix_col_time_30_30_normalized
     # PlanetLab_matrix_col_time_30_30_normalized
-    # Geant_23_23_3000_normalized Abilene_12_12_3000_normalized
-    matrix_file = './output/Seattle_28_28_normalized.npy'
-
-    # 从文件名中提取基本信息（不含路径和扩展名）
-    matrix_filename = os.path.basename(matrix_file).replace('.npy', '')
-
-    # 定义总路线选择比例（用于计算顶层目录名称）
-    route_selection_ratio = 0.15
+    matrix_file = './output/Seattle_99_99_688_matrix_col_time_normalized.npy' # ./output/Abilene_12_12_3000_matrix_col_time_normalized.npy' # Geant_23_23_3000_matrix_col_time_normalized.npy'
 
     print(f"加载数据文件: {matrix_file}")
     if not os.path.exists(matrix_file):
@@ -1909,12 +1896,12 @@ def main():
     print(f"数据类型: {matrix_data.dtype}")
     print(f"数据范围: [{np.nanmin(matrix_data):.2f}, {np.nanmax(matrix_data):.2f}]")
 
-    # 预测时间点范围：50-70（共20个时间点）
-    target_time_range = range(50, 70)
+    # 预测时间点范围：2980-2999（共20个时间点）
+    target_time_range = range(5, 9)
     total_iterations = len(target_time_range)
 
     # 创建汇总结果保存目录
-    summary_save_dir = f'./Result_{matrix_filename}_{int(route_selection_ratio*100)}_summary'
+    summary_save_dir = './online_results_representer_summary'
     os.makedirs(summary_save_dir, exist_ok=True)
 
     # 用于汇总所有时间点的结果
@@ -1934,8 +1921,8 @@ def main():
     print(f"预测时间点范围: {target_time_range.start} - {target_time_range.stop-1}")
     print("="*80)
     print(f"\n存储优化说明:")
-    print(f"  - 预测结果统一保存到顶层: ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/predictions_exp1, predictions_exp2, predictions_exp3, predictions_exp4")
-    print(f"  - 模型文件统一保存到顶层（每次覆盖）: ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/trained_model.pth")
+    print(f"  - 预测结果统一保存到顶层: ./online_results_representer/predictions_top_routes 和 predictions_random_routes")
+    print(f"  - 模型文件统一保存到顶层（每次覆盖）: ./online_results_representer/trained_model.pth")
     print(f"  - 每个时间点的详细结果保存到独立子目录")
     print("="*80)
 
@@ -1966,6 +1953,7 @@ def main():
 
             # 相似性计算参数
             'use_similarity': True,  # 是否计算样本相似性（禁用以避免内存爆炸：True会计算N×N矩阵，需要300GB+内存）
+            'k_neighbors': 5,  # k近邻数量
             'similarity_threshold': 0.8,  # 相似性阈值（用于硬邻居计数）
             'max_similarity_samples': 100000,  # 最大样本数限制（避免内存溢出）
             'top_similar_routes': 1,  # 分析最重要路线相似性时，检查每条路线的前top个相似路线
@@ -1973,11 +1961,15 @@ def main():
             # 代表点配置
             'use_representer': True,  # 使用代表点
             'representer_method': 'gradient',  # 梯度法
-            'route_selection_ratio': route_selection_ratio,  # 总路线选择比例
+            'route_selection_ratio': 0.1,  # 总路线选择比例
+            'top_route_ratio': 0.08,  # 最重要路线的比例（8%）  尝试9 1 和8 2
+            'random_route_ratio': 0.02,  # 从随机路线中选择的比例（2%）
             'dissimilar_threshold': 0.0,  # 不相似阈值（相似度小于此值才可选）
+            'exp3_random_ratio': 0.02,  # 实验3：从重要路线中选择的随机路线比例（2%）
+            'exp4_importance_ratio': 0.1,  # 实验4：重要路线比例（10%）
 
             # 采样配置
-            'sample_rate': 1,  # 优化：从0.8降到0.5，样本数从362K减少到226K（节省40%计算时间）
+            'sample_rate': 1,
             'global_seed': 42,
             'min_train_samples': 100,
 
@@ -1986,8 +1978,8 @@ def main():
             'history_end': target_time,  # 关键：训练到目标时间点之前
 
             # 保存 - 为每个时间点创建独立目录
-            'save_dir': f'./Result_{matrix_filename}_{int(route_selection_ratio*100)}/t{target_time}',
-            'top_level_dir': f'./Result_{matrix_filename}_{int(route_selection_ratio*100)}'  # 顶层目录，统一保存预测结果和模型
+            'save_dir': f'./online_results_representer/t{target_time}',
+            'top_level_dir': './online_results_representer'  # 顶层目录，统一保存预测结果和模型
         }
 
         # 创建并运行学习者
@@ -2071,14 +2063,12 @@ def main():
     print(f"  - all_timepoints_summary.npy: 汇总数据")
     print(f"  - summary_*.png: 汇总可视化图表")
     print(f"\n预测结果（所有时间点）:")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/predictions_exp1/: 实验1（混合策略）预测结果（t50.npy, t51.npy, ...）")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/predictions_exp2/: 实验2（完全随机）预测结果（t50.npy, t51.npy, ...）")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/predictions_exp3/: 实验3（重要+随机）预测结果（t50.npy, t51.npy, ...）")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/predictions_exp4/: 实验4（最重要）预测结果（t50.npy, t51.npy, ...）")
+    print(f"  - ./online_results_representer/predictions_top_routes/: 重要路线的所有预测结果（t2000.npy, t2001.npy, ...）")
+    print(f"  - ./online_results_representer/predictions_random_routes/: 随机路线的所有预测结果（t2000.npy, t2001.npy, ...）")
     print(f"\n共享文件（顶层，每次覆盖）:")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/trained_model.pth: 最新训练的模型")
+    print(f"  - ./online_results_representer/trained_model.pth: 最新训练的模型")
     print(f"\n每个时间点的详细结果（不包含模型和预测）:")
-    print(f"  - ./Result_{matrix_filename}_{int(route_selection_ratio*100)}/tXXXX/: 样本重要性、路线重要性、可视化图等")
+    print(f"  - ./online_results_representer/tXXXX/: 样本重要性、路线重要性、可视化图等")
 
 
 if __name__ == '__main__':

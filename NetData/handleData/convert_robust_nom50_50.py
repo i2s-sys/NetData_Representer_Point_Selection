@@ -75,8 +75,18 @@ def normalize_by_link(matrix, time_axis='col'):
     return normalized_matrix
 
 
-def convert_3d_to_matrix(tensor, num_source, num_dest, num_time, time_axis='row'):
+def convert_3d_to_matrix(tensor, num_source, num_dest, num_time, time_axis='row', max_source=None, max_dest=None):
     """将3D张量转换为矩阵"""
+    
+    # 限制源节点和目标节点的数量
+    if max_source is not None and max_source < num_source:
+        num_source = max_source
+    if max_dest is not None and max_dest < num_dest:
+        num_dest = max_dest
+    
+    # 切片只取前num_source个源节点和前num_dest个目标节点
+    tensor = tensor[:num_source, :num_dest, :]
+    
     if time_axis == 'row':
         # (source, dest, time) -> (time, source * dest)
         matrix = tensor.transpose(2, 0, 1).reshape(num_time, num_source * num_dest)
@@ -86,7 +96,7 @@ def convert_3d_to_matrix(tensor, num_source, num_dest, num_time, time_axis='row'
     return matrix
 
 
-def convert_sparse_to_matrix(sparse_data, num_source, num_dest, num_time, time_axis='row'):
+def convert_sparse_to_matrix(sparse_data, num_source, num_dest, num_time, time_axis='row', max_source=None, max_dest=None):
     """将稀疏索引格式转换为矩阵"""
     # 提取各列
     sources = sparse_data[:, 0].astype(int)
@@ -94,14 +104,31 @@ def convert_sparse_to_matrix(sparse_data, num_source, num_dest, num_time, time_a
     times = sparse_data[:, 2].astype(int)
     values = sparse_data[:, 3]
 
+    # 限制源节点和目标节点的数量
+    if max_source is not None and max_source < num_source:
+        num_source = max_source
+    if max_dest is not None and max_dest < num_dest:
+        num_dest = max_dest
+
     num_link = num_source * num_dest
+
+    # 过滤只保留前num_source个源节点和前num_dest个目标节点的数据
+    mask = (sources < num_source) & (dests < num_dest)
+    filtered_sources = sources[mask]
+    filtered_dests = dests[mask]
+    filtered_times = times[mask]
+    filtered_values = values[mask]
+
+    print(f"  过滤前数据点数: {len(sources)}")
+    print(f"  过滤后数据点数: {len(filtered_sources)}")
+    print(f"  过滤掉数据点数: {len(sources) - len(filtered_sources)}")
 
     if time_axis == 'row':
         # 输出: (time, link)
         matrix = np.zeros((num_time, num_link), dtype=values.dtype)
 
-        print(f"  填充 {len(sources)} 个数据点到 (时间, 链路) 格式...")
-        for i, (s, d, t, v) in enumerate(zip(sources, dests, times, values)):
+        print(f"  填充 {len(filtered_sources)} 个数据点到 (时间, 链路) 格式...")
+        for i, (s, d, t, v) in enumerate(zip(filtered_sources, filtered_dests, filtered_times, filtered_values)):
             col = s * num_dest + d  # 链路索引
             matrix[t, col] = v
 
@@ -109,13 +136,13 @@ def convert_sparse_to_matrix(sparse_data, num_source, num_dest, num_time, time_a
         # 输出: (link, time)
         matrix = np.zeros((num_link, num_time), dtype=values.dtype)
 
-        print(f"  填充 {len(sources)} 个数据点到 (链路, 时间) 格式...")
-        for i, (s, d, t, v) in enumerate(zip(sources, dests, times, values)):
+        print(f"  填充 {len(filtered_sources)} 个数据点到 (链路, 时间) 格式...")
+        for i, (s, d, t, v) in enumerate(zip(filtered_sources, filtered_dests, filtered_times, filtered_values)):
             row = s * num_dest + d  # 链路索引
             matrix[row, t] = v
 
     if (i + 1) % 100000 == 0:
-        print(f"    进度: {i+1}/{len(sources)}")
+        print(f"    进度: {i+1}/{len(filtered_sources)}")
 
     print(f"  ✓ 填充完成")
     return matrix
@@ -123,7 +150,8 @@ def convert_sparse_to_matrix(sparse_data, num_source, num_dest, num_time, time_a
 
 def main():
     parser = argparse.ArgumentParser(description='将网络流量数据转换为二维矩阵（按链路归一化版本）')
-    parser.add_argument('--dataset', type=str, default='Abilene_12_12_3000',
+    # Seattle Harvard72 PMU PlanetLab
+    parser.add_argument('--dataset', type=str, default='Seattle',
                         help='数据集名称 (默认: Abilene_12_12_3000)')
     parser.add_argument('--data_dir', type=str, default='../data',
                         help='数据目录 (默认: ../data)')
@@ -132,6 +160,10 @@ def main():
     parser.add_argument('--time_axis', type=str, default='col',
                         choices=['row', 'col'],
                         help='时间轴方向: row=时间在行, col=时间在列 (默认: col)')
+    parser.add_argument('--max_source', type=int, default=28,
+                        help='最大源节点数量 (默认: 50)')
+    parser.add_argument('--max_dest', type=int, default=28,
+                        help='最大目标节点数量 (默认: 50)')
 
     args = parser.parse_args()
 
@@ -144,6 +176,7 @@ def main():
     else:
         print("输出格式: (链路, 时间) - 每一列=一个时间点 ⭐")
 
+    print(f"限制设置: 最多 {args.max_source} 个源节点，最多 {args.max_dest} 个目标节点")
     print("="*70 + "\n")
 
     # 加载数据
@@ -170,8 +203,19 @@ def main():
         print(f"  目标节点数: {num_dest}")
         print(f"  时间点数: {num_time}")
 
+        # 应用节点数量限制
+        actual_source = min(num_source, args.max_source)
+        actual_dest = min(num_dest, args.max_dest)
+
+        if actual_source < num_source or actual_dest < num_dest:
+            print(f"\n应用节点数量限制:")
+            print(f"  限制后源节点数: {actual_source} (原始: {num_source})")
+            print(f"  限制后目标节点数: {actual_dest} (原始: {num_dest})")
+            print(f"  限制后链路数: {actual_source * actual_dest} (原始: {num_source * num_dest})")
+
         print(f"\n开始转换...")
-        matrix = convert_3d_to_matrix(data, num_source, num_dest, num_time, args.time_axis)
+        matrix = convert_3d_to_matrix(data, num_source, num_dest, num_time, args.time_axis, 
+                                       args.max_source, args.max_dest)
 
     elif len(data.shape) == 2 and data.shape[1] == 4:
         # 格式2: 稀疏索引格式 (N, 4)
@@ -197,6 +241,16 @@ def main():
         print(f"  时间点数: {num_time}")
         print(f"  总链路数: {num_link}")
 
+        # 应用节点数量限制
+        actual_source = min(num_source, args.max_source)
+        actual_dest = min(num_dest, args.max_dest)
+
+        if actual_source < num_source or actual_dest < num_dest:
+            print(f"\n应用节点数量限制:")
+            print(f"  限制后源节点数: {actual_source} (原始: {num_source})")
+            print(f"  限制后目标节点数: {actual_dest} (原始: {num_dest})")
+            print(f"  限制后链路数: {actual_source * actual_dest} (原始: {num_link})")
+
         # 验证
         expected_points = num_source * num_dest * num_time
         actual_points = len(sources)
@@ -214,7 +268,8 @@ def main():
         print(f"  流量值: [{values.min():.4f}, {values.max():.4f}]")
 
         print(f"\n开始转换...")
-        matrix = convert_sparse_to_matrix(data, num_source, num_dest, num_time, args.time_axis)
+        matrix = convert_sparse_to_matrix(data, num_source, num_dest, num_time, args.time_axis,
+                                          args.max_source, args.max_dest)
 
     else:
         print(f"\n✗ 错误：不支持的数据格式")
@@ -261,7 +316,21 @@ def main():
     # 保存矩阵
     os.makedirs(args.output_dir, exist_ok=True)
     suffix = '_col_time' if args.time_axis == 'col' else '_row_time'
-    output_path = os.path.join(args.output_dir, f'{args.dataset}_matrix{suffix}_normalized.npy')
+    
+    # 检查是否应用了节点限制，如果是则添加后缀
+    limit_suffix = ''
+    if args.max_source is not None and args.max_dest is not None:
+        limit_suffix = f'_{args.max_source}_{args.max_dest}'
+    
+    output_path = os.path.join(args.output_dir, f'{args.dataset}_matrix{suffix}{limit_suffix}_normalized.npy')
+
+    # 显示文件名信息
+    print(f"\n文件命名:")
+    print(f"  基础名称: {args.dataset}_matrix{suffix}")
+    if limit_suffix:
+        print(f"  节点限制: {limit_suffix} ({args.max_source}个源节点 x {args.max_dest}个目标节点)")
+    print(f"  归一化标记: _normalized")
+    print(f"  完整文件名: {os.path.basename(output_path)}")
 
     np.save(output_path, matrix)
 
