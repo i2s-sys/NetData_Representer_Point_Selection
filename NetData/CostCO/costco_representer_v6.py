@@ -1891,7 +1891,7 @@ def main():
     # Seattle_matrix_col_time_30_30_normalized
     # PlanetLab_matrix_col_time_30_30_normalized
     # Geant_23_23_3000_normalized Abilene_12_12_3000_normalized
-    matrix_file = './output/Seattle_28_28_normalized.npy'
+    matrix_file = './dataset/Seattle_28_28_normalized.npy'
 
     # 从文件名中提取基本信息（不含路径和扩展名）
     matrix_filename = os.path.basename(matrix_file).replace('.npy', '')
